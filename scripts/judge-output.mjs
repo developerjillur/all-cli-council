@@ -69,7 +69,7 @@ export const FIRST_LINE_ONLY = [
 /** Below this, it is a status line rather than a considered answer. */
 export const MIN_ANSWER_CHARS = 24;
 
-/** Only the first N characters are examined for the unambiguous patterns. */
+/** Only the first N characters of stderr are examined for the unambiguous patterns. */
 const HEAD = 400;
 
 /**
@@ -81,9 +81,29 @@ export function judgeOutput(out, err, code) {
   if (!text) return [false, (err || '').trim() || 'empty output'];
   if (text.length < MIN_ANSWER_CHARS) return [false, `output too short to be an answer: "${text}"`];
 
-  const head = text.slice(0, HEAD);
-  const firstLine = text.split('\n')[0];
-  const refusal = UNAMBIGUOUS.some((re) => re.test(head))
+  // **Both tiers are now gated the same way: a SHORT LINE near the top.**
+  //
+  // The unambiguous tier used to scan the first 400 characters of body text with no anchoring at all,
+  // and that is a false positive waiting for a specific kind of answer — the kind this package invites.
+  // Measured: this real answer was silently discarded —
+  //
+  //   "The comment in judge-output.mjs says a member printing 'You have hit your usage limit' and
+  //    exiting 0 was ranked as an opinion. That guard is the right idea but it scans unanchored body
+  //    text, which is a false-positive risk."
+  //
+  // — and **the context pack ships the trigger strings**, because they are quoted in this file's own
+  // comments and in the tests. So a member reviewing the quota guard was liable to be thrown out by
+  // the quota guard, and the run would report it as a CLI failure. Discarding a good answer silently
+  // is the cost this file's header calls worse than the thing being guarded against, and here it was
+  // aimed squarely at the most useful answers available.
+  //
+  // A CLI's status message is terse and occupies its own line. An essay that MENTIONS a quota writes
+  // it inside a sentence. Length and line position separate them; vocabulary never could.
+  const lines = text.split('\n');
+  const topLines = lines.slice(0, 3).filter((l) => l.trim());
+  const statusish = topLines.filter((l) => l.trim().length <= STATUS_LINE_MAX);
+  const firstLine = lines[0];
+  const refusal = statusish.some((l) => UNAMBIGUOUS.some((re) => re.test(l)))
     || (firstLine.length <= STATUS_LINE_MAX && FIRST_LINE_ONLY.some((re) => re.test(firstLine)));
   if (refusal) {
     return [false, `refused: the CLI reported a limit or auth failure — "${firstLine.slice(0, 90)}"`];

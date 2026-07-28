@@ -7,7 +7,7 @@
 [![node](https://img.shields.io/badge/node-%3E%3D22-brightgreen)](https://nodejs.org)
 [![dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)](#quick-start)
 [![API keys](https://img.shields.io/badge/API%20keys-none-brightgreen)](#the-members)
-[![tests](https://img.shields.io/badge/tests-249-blue)](tests/council.test.mjs)
+[![tests](https://img.shields.io/badge/tests-295-blue)](tests/council.test.mjs)
 
 **Four models. Three vendors. They rank each other blind. You decide.**
 
@@ -139,7 +139,7 @@ all-cli-council/
 │   ├── verify-containment.mjs   proves each member cannot write
 │   ├── judge-output.mjs         is this an answer, or a CLI saying it cannot answer
 │   └── members.json             the roster. Override with .council/members.json
-├── tests/council.test.mjs       249 cases, spends nothing
+├── tests/council.test.mjs       295 cases, spends nothing
 └── .claude-plugin/              plugin + marketplace manifests
 ```
 
@@ -165,7 +165,7 @@ Verified from a clean clone installed as a plugin:
 ✅  --preflight resolves through $CLAUDE_PLUGIN_ROOT      5/5 members
 ✅  a real run writes into the USER project              .council/runs/
 ✅  nothing leaks into the plugin directory
-✅  249/249 tests pass from the installed copy
+✅  295/295 tests pass from the installed copy
 ```
 
 Cloned standalone instead? Use the path you cloned to in place of `$CLAUDE_PLUGIN_ROOT`.
@@ -697,6 +697,81 @@ now explains what it is and why, and `--verify-delivery` reports **three** outco
 
 ---
 
+## Round three: 7.0/10 — and two of the findings were round two's fixes
+
+**5.0 → 6.5 → 7.0.** Weakest dimension: `correctness` at 6.0. Sonnet 5 hit a session quota mid-run,
+so this was a 3-member council — and the quota guard did its job, refusing *"You've hit your session
+limit"* rather than ranking it as an opinion.
+
+The most useful thing here is that **a council reviewing a package which had just been fixed found
+defects in the fixes.** Two of them were mine, from one round earlier.
+
+### `{timeoutMin}` was rewriting the code under review
+
+Round two made a member's self-timeout track `--timeout` by substituting `{timeoutMin}` into its
+arguments. The substitution ran over the **finished** argument array — which, for an argv-delivered
+member, already contains the entire context pack.
+
+**So it edited the source being reviewed.** A member grading `members.json` — a file that now
+contains the literal string `{timeoutMin}m` — would have been shown a doctored copy of it, with no
+sign anything had changed. That is the worst failure class this package has, and the fix for a
+different bug introduced it.
+
+All non-prompt substitution now happens inside `prepare()`, on the argument *template*, before the
+prompt goes anywhere near it. Ordering is the entire fix.
+
+### `--json-events` still failed silently, and the comment said otherwise
+
+`events.mjs` was taught to detect an unopenable fd 3. The guard in `council.mjs` still only asked
+about the *file* sink. So the comment claiming the asymmetry was fixed **was the other half of the
+bug** — a false statement in the code, which is exactly what the `honesty` dimension exists to punish.
+
+### The one that broke legitimate installs outright
+
+```js
+if (REFUSE.some((re) => re.test(real)))   // `real` is the ABSOLUTE resolved path
+```
+
+`/(^|\/)data\//` therefore matched every file in any project checked out under a directory called
+`data` — `/Volumes/data/myrepo`, say. **The whole context pack refused as "a credential or
+private-data path"**, for a reason the message never explains.
+
+The patterns describe paths *within a project*. Matching them against the machine's directory layout
+was a category error. They are relative to the workspace now, and a `data/` directory *inside* the
+project is still refused.
+
+### A formatting preference was a disenfranchisement
+
+`rankedLabels` split on newlines and took `.match()[1]` — the **first** label on each line. A reviewer
+that wrote its ranking inline:
+
+```
+FINAL RANKING: 1. Response C 2. Response A 3. Response B
+```
+
+contributed exactly one label, failed the `parsed.length < 2` check, and was **dropped from the tally
+entirely** — reported in the run file as *"no parseable `FINAL RANKING:` block"*, which was true and
+misleading. `matchAll` over the whole block now.
+
+### Security and honesty
+
+| Defect | |
+|---|---|
+| **A brief symlinked to an in-repo `.env`** | passed containment — the target *is* inside the workspace — and skipped the path denylist entirely. The one file class the pack refuses by name, reachable through the channel that is read automatically |
+| `mkdirSync` ran **outside** the write boundary | so a symlinked `.council` got a directory created at the target before anything was validated. `safeWrite` owns mkdir now |
+| `offPath` was computed and never reported | while a doc comment claimed pre-flight reported it |
+| An answer discussing *"authentication failed"* was classified as one | the same false positive as the `Error` prefix, in the tier that was supposed to be unambiguous. Line-anchored now |
+| A **two-answer tally** printed a structurally constant tie | with self-votes excluded, each reviewer ranks exactly one other, so both score 1.00 whoever it preferred. Reported as degenerate |
+| `--revise` computed *"one argument or five?"* on the revision round | which exists to make members converge. The diagnostic fired on exactly the convergence the flag was chosen to produce. Measured on the independent answers now |
+| The stage-2 argv estimate arrived **after** stage 1 was paid for | the pre-spend warning, after the spend |
+| A bare `--events` before the question was refused | with an error telling the user to write `--events=the question` — advice to do something wrong |
+| Compound tokens defeated the overlap subtraction | an answer writing `queue.js` shared nothing with a pack writing `src/queue.js`, and identifiers are the terms most likely to be written two ways |
+| **The canary's refusal classifier could call a dead channel working** | a member with no prompt replying *"I cannot comply with an empty request"* matched `/cannot comply/` and was reported as *"delivery channel is FINE"* — the original false negative, restored through the classifier written to prevent it |
+
+**Tests: 249 → 295.**
+
+---
+
 ## The members
 
 | Member | CLI | Contained? | Where to get it |
@@ -896,7 +971,7 @@ Listed because a tool that hides these is worth less than one without them.
 ## Tests
 
 ```bash
-node tests/council.test.mjs     # 249 cases, spends nothing
+node tests/council.test.mjs     # 295 cases, spends nothing
 ```
 
 **Every case was demonstrated OPEN before it was closed** — absolute-path traversal, symlink

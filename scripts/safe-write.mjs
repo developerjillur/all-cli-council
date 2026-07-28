@@ -83,7 +83,27 @@ export function safeWrite(target, contents, root) {
   if (!check.ok) return check;
   try {
     fs.mkdirSync(path.dirname(check.path), { recursive: true });
-    fs.writeFileSync(check.path, contents);
+
+    // **O_NOFOLLOW closes the window the check cannot.**
+    //
+    // `checkWritable` is an lstat, and anything between the lstat and the open is a race: a symlink
+    // planted in that gap is followed, and no amount of checking beforehand can see it. O_NOFOLLOW
+    // makes the KERNEL refuse to follow a symlink at the final path component, so the guarantee no
+    // longer depends on winning a race. The lstat stays because it produces a good error message;
+    // this is what actually enforces it.
+    const flags = fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC
+      | (fs.constants.O_NOFOLLOW ?? 0);
+    let fd;
+    try {
+      fd = fs.openSync(check.path, flags, 0o644);
+    } catch (e) {
+      if (e.code === 'ELOOP' || e.code === 'EMLINK') {
+        return { ok: false, reason: `${path.relative(root, check.path)} became a symlink between the `
+          + `check and the write. Refused by the kernel (O_NOFOLLOW) rather than followed.` };
+      }
+      throw e;
+    }
+    try { fs.writeFileSync(fd, contents); } finally { fs.closeSync(fd); }
     return { ok: true, path: check.path };
   } catch (e) {
     return { ok: false, reason: `could not write ${path.relative(root, check.path)}: ${e.message}` };

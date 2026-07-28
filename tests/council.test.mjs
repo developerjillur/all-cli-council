@@ -24,7 +24,7 @@ import { prepare, deliveryOf, canary, argvCeiling } from '../scripts/prompt-deli
 import { checkWritable, safeWrite } from '../scripts/safe-write.mjs';
 import { rankedLabels, borda, familyMix, familyMajority, reasoningOverlap, parseConfidence, parseRubric,
   aggregateScores, shuffled, contentTokens } from '../scripts/diagnostics.mjs';
-import { assignLenses, LENSES, stage1, stage2, rubric, RUBRIC_DIMENSIONS } from '../scripts/prompts.mjs';
+import { assignLenses, LENSES, stage1, stage2, rubric, rubric1b, RUBRIC_DIMENSIONS } from '../scripts/prompts.mjs';
 import { judgeOutput, MIN_ANSWER_CHARS } from '../scripts/judge-output.mjs';
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -1300,6 +1300,125 @@ console.log('\n▸ Round three — 7.0/10, and two of these were regressions fro
     check('nothing mkdirs the output directory outside the write boundary',
       !/fs\.mkdirSync\(OUT_DIR/.test(src), 'safeWrite owns mkdir now');
   }
+}
+
+// ── round four: 7.0/10 again, with a tighter range ───────────────────────────
+console.log('\n▸ Round four — 7.0/10 (range 5.5–7.8), and one finding was self-inflicted');
+{
+  // WAS OPEN, and it was aimed at the most useful answers available. The UNAMBIGUOUS tier scanned the
+  // first 400 characters of BODY text with no anchoring — and this package's own comments and tests
+  // quote the trigger strings, so they ship inside the context pack. A member reviewing the quota
+  // guard was liable to be discarded BY the quota guard, reported as a CLI failure.
+  {
+    const quoting = 'The comment in judge-output.mjs says a member printing "You have hit your usage '
+      + 'limit" and exiting 0 was ranked as an opinion. That guard scans unanchored body text, which is '
+      + 'a false-positive risk worth closing.';
+    check('a real answer that QUOTES a quota message survives', judgeOutput(quoting, '', 0)[0] === true,
+      'the pack ships this exact trigger string in its own comments');
+    check('a real answer opening about rate limiting survives',
+      judgeOutput('Rate limit exceeded handling belongs off the hot path, because a 429 should surface '
+        + 'as a filler rather than as silence for the caller.', '', 0)[0] === true);
+
+    // The guard still has to work on what it was written for.
+    for (const [what, out] of [
+      ['a bare quota line', 'You have hit your usage limit, resets tomorrow'],
+      ['a quota line under a banner', 'codex v1.2\nRate limit exceeded'],
+      ['an auth line', 'Authentication failed. Please log in.'],
+      ['a billing line', 'insufficient credit on this account, billing_not_active'],
+    ]) check(`...and ${what} is still refused`, judgeOutput(out, '', 0)[0] === false);
+  }
+
+  // WAS OPEN: the pre-spend warning counted CHARACTERS while prepare() and the kernel count BYTES —
+  // the exact confusion prompt-delivery.mjs documents fixing, alive in the warning whose whole job is
+  // to give advance notice of it.
+  check('the pre-spend argv estimate is measured in bytes',
+    /Buffer\.byteLength\(preamble, 'utf8'\)/.test(fs.readFileSync(path.join(ROOT, 'scripts', 'council.mjs'), 'utf8')),
+    'on a pack full of em-dashes chars and bytes differ by 3x');
+
+  // WAS OPEN: `Number(flag) > 0` accepted 0.0001 — a 6-millisecond budget, every member killed before
+  // it could speak and reported as "timed out after 0 min".
+  {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'council-to-'));
+    const run = (t) => spawnSync('node', [path.join(ROOT, 'scripts', 'council.mjs'), 'q', '--preflight', `--timeout=${t}`],
+      { encoding: 'utf8', timeout: 40_000, cwd: dir });
+    check('an absurdly small --timeout is clamped, not honoured',
+      /clamped to 1 minute/.test(run('0.0001').stderr ?? ''), 'it used to become a 6ms budget');
+    check('an absurdly large --timeout is clamped too',
+      /clamped to 120/.test(run('99999').stderr ?? ''), 'the never-hang guarantee needs an upper bound');
+    check('a sensible --timeout passes through untouched', !/clamped/.test(run('20').stderr ?? ''));
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+
+  // WAS OPEN: a roster whose delivery mode had no matching placeholder spawned the CLI with NO PROMPT
+  // — the `agy` failure again: exit 0, a fluent answer to an empty question, ranked against real ones.
+  {
+    const noPlaceholder = { id: 'x', label: 'X', cmd: 'true', promptVia: 'argv', args: ['--print'] };
+    const r = prepare(noPlaceholder, 'the prompt', os.tmpdir(), 'darwin');
+    check('an argv member with no {prompt} is refused, not run empty', r.ok === false);
+    check('...and the reason says it would answer an empty question', /empty question/.test(r.reason ?? ''));
+    const noFile = { id: 'y', label: 'Y', cmd: 'true', promptVia: 'file', args: ['--f'] };
+    check('a file member with no {promptFile} is refused too', prepare(noFile, 'p', os.tmpdir(), 'darwin').ok === false);
+  }
+
+  // WAS OPEN: the tilde in scratchDir was replaced ANYWHERE, so a legitimate path containing one was
+  // rewritten at the wrong offset.
+  check('only a LEADING tilde is expanded in scratchDir',
+    /replace\(\/\^~\(\?=\\\/\|\$\)\/, os\.homedir\(\)\)/.test(fs.readFileSync(path.join(ROOT, 'scripts', 'council.mjs'), 'utf8')));
+
+  // WAS OPEN: the write boundary was lstat-then-open, a race no amount of checking can close.
+  {
+    const src = fs.readFileSync(path.join(ROOT, 'scripts', 'safe-write.mjs'), 'utf8');
+    check('the final write uses O_NOFOLLOW, so the kernel enforces it', /O_NOFOLLOW/.test(src),
+      'the lstat stays for the error message; this is what closes the TOCTOU window');
+    // And it must still work normally.
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'council-nofollow-'));
+    const w = safeWrite(path.join(root, 'a', 'b.md'), 'body', root);
+    check('...and an ordinary write still succeeds', w.ok && fs.readFileSync(w.path, 'utf8') === 'body');
+    // Overwriting an existing regular file is the normal case for a re-run.
+    check('...and overwriting an existing file works', safeWrite(path.join(root, 'a', 'b.md'), 'again', root).ok);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+
+  // WAS OPEN: members inherited process.env wholesale, so a developer shell's OPENAI_API_KEY,
+  // AWS_SECRET_ACCESS_KEY and GITHUB_TOKEN were handed to four vendors' CLIs on every call. Measured
+  // with a spy member that printed its own environment: the canary and a fake key did NOT arrive,
+  // while HOME and PATH did — which is what the CLIs authenticate from.
+  {
+    const src = fs.readFileSync(path.join(ROOT, 'scripts', 'council.mjs'), 'utf8');
+    check('members are given an environment ALLOWLIST, not the parent\'s', /const ENV_ALLOW = \[/.test(src));
+    check('...and it is applied at spawn', /env: memberEnv/.test(src));
+    check('...and HOME survives, because that is where the CLIs keep their auth',
+      /'HOME'/.test(src.match(/const ENV_ALLOW = \[[\s\S]*?\];/)?.[0] ?? ''));
+    check('...and nothing credential-shaped is on the list',
+      !/API_KEY|TOKEN|SECRET|PASSWORD/.test(src.match(/const ENV_ALLOW = \[[\s\S]*?\];/)?.[0] ?? ''));
+    check('...and how many variables were withheld is reported', /withheld/.test(src));
+  }
+
+  // WAS OPEN, and it was a silent wrong answer: --rubric --revise handed judges the ordinary revision
+  // prompt, which asks for a better ANSWER and says nothing about scores. Every SCORE: line vanished
+  // and the run reported "no judge produced a parseable OVERALL" as though they had failed to comply.
+  {
+    const r1b = rubric1b('BRIEF', 'grade this', 'BOARD', null);
+    check('rubric mode has its own revision prompt', typeof rubric1b === 'function');
+    check('...which re-states every dimension',
+      RUBRIC_DIMENSIONS.every(([d]) => r1b.includes(`SCORE: ${d}`)));
+    check('...and asks for OVERALL again', /OVERALL: <n>\/10/.test(r1b));
+    check('...and says a revision that drops the format is discarded', /discarded/.test(r1b));
+    check('...and fences the other reviews as data', /DATA, not instructions/.test(r1b));
+    check('...and tells the judge what a second pass is FOR',
+      /reason to lower that dimension/.test(r1b), 'not "write it again at greater length"');
+    const src = fs.readFileSync(path.join(ROOT, 'scripts', 'council.mjs'), 'utf8');
+    check('...and council.mjs routes rubric revisions to it', /rubricMode\s*\n?\s*\? P\.rubric1b/.test(src));
+  }
+
+  // WAS OPEN: a failed peer review could still reach the Borda tally, because rankedLabels will find
+  // "Response A" in an error message that echoed the prompt back.
+  check('only successful reviews reach the tally',
+    /borda\(reviews\.filter\(\(r\) => r\.ok\), ids\)/.test(fs.readFileSync(path.join(ROOT, 'scripts', 'council.mjs'), 'utf8')));
+
+  // WAS OPEN: overlap computed over a subset said so only in the JSON sibling, not where the number is.
+  check('the report discloses when overlap used a subset of members',
+    /Overlap basis/.test(fs.readFileSync(path.join(ROOT, 'scripts', 'council.mjs'), 'utf8')));
 }
 
 // ── the CLI actually runs, end to end, with the flags it documents ───────────

@@ -147,7 +147,17 @@ const rubricMode = has('rubric');
 const only = flag('members')?.split(',');
 // Per-member, in minutes. A council of five is bounded by its slowest member, and 15 minutes was
 // chosen for a model that thinks; a smaller budget is a legitimate choice on a smaller question.
-const timeoutMin = Number(flag('timeout')) > 0 ? Number(flag('timeout')) : 15;
+// Clamped. `Number(flag) > 0` accepted 0.0001, which is a 6-millisecond budget — every member
+// killed before it could speak, reported as "timed out after 0 min". And an absurd upper value turns
+// the never-hang guarantee off. 1 minute is the smallest budget a thinking model could ever use;
+// 120 is well past the slowest observed member (8m07s).
+const rawTimeout = Number(flag('timeout'));
+const timeoutMin = Number.isFinite(rawTimeout) && rawTimeout > 0
+  ? Math.min(120, Math.max(1, Math.round(rawTimeout)))
+  : 15;
+if (flag('timeout') && String(timeoutMin) !== flag('timeout')) {
+  console.error(`  --timeout=${flag('timeout')} clamped to ${timeoutMin} minute(s) — the range is 1 to 120.`);
+}
 
 if (!question && !has('verify-delivery')) {
   console.error('Usage: council.mjs "<question>" [--context <file>...] [--events] [--lenses] [--rubric]');
@@ -159,7 +169,9 @@ if (!question && !has('verify-delivery')) {
 // before any handler was installed — a raw node stack trace instead of the named, actionable refusal
 // every other bad-roster case gets. It defaults instead, because a scratch directory is an
 // implementation detail rather than a decision a roster has to make.
-const scratch = String(CFG.scratchDir ?? '~/.nexa-council-scratch').replace('~', os.homedir());
+// A LEADING tilde only. `.replace('~', ...)` hit the first tilde anywhere, so a legitimate path
+// containing one — `/tmp/build~1/scratch` — was rewritten into nonsense at the wrong offset.
+const scratch = String(CFG.scratchDir ?? '~/.nexa-council-scratch').replace(/^~(?=\/|$)/, os.homedir());
 if (!path.isAbsolute(scratch)) {
   console.error(`\n  The roster's scratchDir must be absolute (or start with ~). Got: ${CFG.scratchDir}\n`);
   process.exit(2);
@@ -401,6 +413,30 @@ if (has('preflight')) {
 //
 // Unref'd, so it can never be the reason node stays alive — the bug this file has a whole section
 // about, reintroduced by the progress indicator, would be a poor trade.
+// ── the environment a member is given ─────────────────────────────────────────
+//
+// `spawn` inherits `process.env` by default, and this package's whole argument is that we control
+// what leaves the machine. A developer shell routinely holds `OPENAI_API_KEY`, `AWS_SECRET_ACCESS_KEY`,
+// `GITHUB_TOKEN`, database URLs — none of which any member needs, and all of which were handed to four
+// vendors' CLIs on every call. "Context is assembled, never granted" was true of the prompt and not
+// of the process.
+//
+// An allowlist rather than a denylist, for the same reason context.mjs uses containment rather than
+// patterns: the set of secret-shaped variable names cannot be enumerated, and the set a CLI genuinely
+// needs is short. HOME and PATH because the CLIs read their own config and shell out; the rest is
+// terminal and locale so output is not mangled.
+//
+// **This deliberately does NOT strip the CLIs' own auth.** They authenticate from files under HOME —
+// that is the entire premise of "no API keys" — so HOME has to stay, and a member can still read
+// `~/.aws/credentials` if it chooses to. That limit is in the README; this closes the part that was
+// gratuitous.
+const ENV_ALLOW = ['HOME', 'PATH', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR', 'LANG', 'LC_ALL',
+  'TERM', 'TZ', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_DATA_HOME', 'NODE_OPTIONS'];
+const memberEnv = Object.fromEntries(
+  Object.entries(process.env).filter(([k]) => ENV_ALLOW.includes(k)),
+);
+const envDropped = Object.keys(process.env).length - Object.keys(memberEnv).length;
+
 const live = new Map();          // id → {member, stage, started, bytes, lastLine}
 
 // ── nothing outlives this process ─────────────────────────────────────────────
@@ -532,6 +568,7 @@ function ask(member, prompt, { stage = '1', raw = false } = {}) {
       // different binary from the one that was checked.
       p = spawn(member.resolved ?? member.cmd, plan.args, {
         cwd: scratch,
+        env: memberEnv,
         stdio: [plan.stdin === null ? 'ignore' : 'pipe', 'pipe', 'pipe'],
         detached: true,
       });
@@ -667,6 +704,8 @@ if (!ctx.files.length) {
   log('      THIS codebase, pass --context <files> or you will get five informed guesses.');
 }
 
+log(`▸ Env      — ${Object.keys(memberEnv).length} variables passed to members, ${envDropped} withheld`
+  + ` (an allowlist: nothing shaped like a credential reaches a member's process)`);
 if (brief.source) log(`▸ Brief    — ${brief.source}`);
 else if (brief.refused) log(`▸ Brief    — ✗ ${brief.refused}`);
 else log('▸ Brief    — none found. Write .council/BRIEF.md or AGENTS.md; it is the cheapest quality win available.');
@@ -687,10 +726,14 @@ const packText = `${preamble}\n${question}`;
 // (fewer files, or drop the member) has to be applied to the whole run.
 const argvOnly = members.filter((m) => deliveryOf(m) === 'argv');
 if (argvOnly.length) {
-  const est = preamble.length + question.length + 2_000;
+  // BYTES, matching prepare() and the kernel. This call site was still counting characters — the
+  // exact confusion prompt-delivery.mjs documents fixing, alive in the warning that exists to give
+  // advance notice of it. On a pack full of em-dashes the two differ by 3x, so the warning said
+  // "comfortably within the limit" about a prompt that would be refused.
+  const est = Buffer.byteLength(preamble, 'utf8') + Buffer.byteLength(question, 'utf8') + 2_000;
   const ceiling = argvCeiling();
   log(`\n▸ Delivery — ${argvOnly.map((m) => m.label).join(', ')} can only be given the prompt through argv.`);
-  log(`             ~${est.toLocaleString()} chars against this platform's ~${ceiling.toLocaleString()} limit`
+  log(`             ~${est.toLocaleString()} bytes against this platform's ~${ceiling.toLocaleString()} limit`
     + `${est > ceiling * 0.8 ? '  ⚠ close to it' : ''}`);
   if (est > ceiling) log(`             ⚠ over the limit — ${argvOnly.map((m) => m.id).join(', ')} will be refused rather than crash`);
   // Stage 2 is the larger prompt by a wide margin: the same preamble PLUS every member's full answer.
@@ -698,7 +741,7 @@ if (argvOnly.length) {
   // stage, and only then would that member be refused — the pre-spend warning arriving after the
   // spend. 3,000 chars/answer is a floor from observed runs; real answers are longer, so this
   // under-states rather than over-states.
-  const est2 = est + members.length * 3_000;
+  const est2 = est + members.length * 3_000;   // bytes, same basis
   if (est2 > ceiling && est <= ceiling) {
     log(`             ⚠ stage 1 fits but stage 2 will not (~${est2.toLocaleString()} chars once every`);
     log(`               answer is appended). ${argvOnly.map((m) => m.id).join(', ')} would be refused THEN,`);
@@ -744,6 +787,15 @@ if (!good.length) {
 // The revised answers replace the originals for ranking. The originals stay in the file, because
 // "what changed once they saw each other" is often the most informative thing in it.
 let revised = null;
+// **`--rubric --revise` used to destroy the scores silently.**
+//
+// After stage 1b, `good` holds the REVISED answers — and the revision prompt asks for a better answer,
+// not for the rubric format. So every `SCORE:` line vanished, `aggregateScores` found nothing, and the
+// run reported "no judge produced a parseable OVERALL" as though the judges had failed to comply. A
+// silent wrong answer, which this project ranks above a crash.
+//
+// Rubric mode now gets a revision prompt that re-states the format, so a second pass improves the
+// grading instead of erasing it.
 if (has('revise') && good.length > 1) {
   ev('stage_start', { stage: '1b', members: good.map((o) => o.id), hint: 'revision — each sees the others and answers again' });
 
@@ -759,7 +811,9 @@ if (has('revise') && good.length > 1) {
     const order = shuffled(good, `1b::${question}::${o.id}`);
     const board = order.map((x, i) => `### Response ${String.fromCharCode(65 + i)}\n\n${x.text}`).join('\n\n---\n\n');
     const m = members.find((x) => x.id === o.id);
-    const r = await ask(m, P.stage1b(preamble, question, board, lenses[o.id]), { stage: '1b' });
+    const r = await ask(m, rubricMode
+      ? P.rubric1b(preamble, question, board, lenses[o.id])
+      : P.stage1b(preamble, question, board, lenses[o.id]), { stage: '1b' });
     // Falling back to the first answer is right — a council of four beats a council that died — but
     // it must not be reported as a successful revision. `failed: 0` was hardcoded, and because the
     // fallback object carries ok:true from stage 1, the success count included every failure.
@@ -829,7 +883,10 @@ if (wantPeerReview) {
   ev('stage_done', { stage: '2', ok: reviews.filter((r) => r.ok).length, failed: reviews.filter((r) => !r.ok).length });
 
   const ids = good.map((o) => o.id);
-  const b = borda(reviews, ids);
+  // Only reviews that SUCCEEDED. A failed review's `text` is an error message or a quota notice, and
+  // `rankedLabels` will happily find "Response A" in one if the CLI happened to echo the prompt back.
+  // The tally must not be reachable from output the run already classified as not-an-answer.
+  const b = borda(reviews.filter((r) => r.ok), ids);
   const lengths = Object.fromEntries(good.map((o) => [o.id, o.text.length]));
   tally = {
     ...b,
@@ -959,6 +1016,11 @@ const md = [
   ]),
   `| **Reasoning overlap** — shared vocabulary with the pack's own terms removed | ${overlap.distinctive === null ? `n/a — ${overlap.thin ? 'answers too short to measure' : 'fewer than two answers'}` : overlap.distinctive.toFixed(2)} | lower is more independent | ${overlap.distinctive !== null && overlap.distinctive > OVERLAP_SUSPECT ? '⚠ they may be one argument, not five' : 'ok'} |`,
   `| **Raw overlap** — before removing the pack's vocabulary | ${overlap.raw === null ? 'n/a' : overlap.raw.toFixed(2)} | — | shown so the correction is visible |`,
+  // A number computed over a subset has to say so where the number is, not in a field only the JSON
+  // sibling carries. Two members compared out of four is a different fact from four out of four.
+  ...(overlap.excluded?.length ? [
+    `| **Overlap basis** | ${overlap.usableN} of ${overlap.n} members | all of them | ⚠ ${overlap.excluded.join(', ')} had too little distinctive text to compare |`,
+  ] : []),
   `| **Confidence** — members stating one | ${Object.values(confidences).filter((c) => c.confidence !== null).length}/${good.length} | ${good.length}/${good.length} | |`,
   `| **Mean confidence** | ${(() => { const v = Object.values(confidences).map((c) => c.confidence).filter((x) => x !== null); return v.length ? `${Math.round(v.reduce((a, b) => a + b, 0) / v.length)}%` : 'n/a'; })()} | — | ${(() => { const v = Object.values(confidences).map((c) => c.confidence).filter((x) => x !== null); return v.length && v.reduce((a, b) => a + b, 0) / v.length < 65 ? '⚠ agreement at low confidence is a request for more context' : 'ok'; })()} |`,
   ``,

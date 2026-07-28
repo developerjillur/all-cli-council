@@ -116,6 +116,23 @@ export function prepare(member, prompt, scratch, platform = process.platform, su
     return { ok: true, via, args, stdin: prompt, exposed: false, cleanup: () => {} };
   }
 
+  // Structural validation, because the failure mode is silence.
+  //
+  // A roster declaring `promptVia: "argv"` with no `{prompt}` in its args — a typo, a hand-written
+  // entry, a member copied and edited — spawned the CLI with no prompt at all. Which is the `agy`
+  // failure again: exit 0, a fluent answer to an empty question, ranked against real ones. The
+  // placeholder is not a convenience, it is the delivery mechanism.
+  if (via === 'file' && !args.some((a) => a.includes('{promptFile}'))) {
+    return { ok: false, via, reason: `member "${member.id}" declares promptVia:"file" but no argument `
+      + `contains {promptFile}, so the prompt has nowhere to go. It would run with no prompt and answer `
+      + `an empty question — refused instead.` };
+  }
+  if (via === 'argv' && !args.some((a) => a.includes('{prompt}'))) {
+    return { ok: false, via, reason: `member "${member.id}" declares promptVia:"argv" but no argument `
+      + `contains {prompt}, so the prompt has nowhere to go. It would run with no prompt and answer an `
+      + `empty question — refused instead.` };
+  }
+
   if (via === 'file') {
     // 0600 and inside the scratch dir. A world-readable prompt file would reintroduce, on disk
     // and for longer, exactly the exposure argv had.

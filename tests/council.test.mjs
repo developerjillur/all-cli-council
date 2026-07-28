@@ -1991,6 +1991,60 @@ console.log('\n▸ Labelled fields — models write markdown, not bare labels');
     !/\^\[\^\\S\\n\]\*(?:FINDING|MINORITY|WHAT IS LOST|SINGLE BIGGEST)/.test(src));
 }
 
+// ── a telemetry channel must not be able to take the run down ────────────────
+console.log('\n▸ fd 3 — a consumer that stops reading must not stop the council');
+{
+  // WAS OPEN, and it was a hang in a package whose central claim is that it cannot hang. `fs.writeSync`
+  // to a pipe nobody drains fills the ~64 KiB pipe buffer and then blocks FOREVER. Measured before the
+  // fix: a child writing 400-byte lines to an unread fd 3 stopped dead and had to be SIGKILLed.
+  //
+  // So a parent that asked for `--json-events` and then fell behind — or crashed, or simply forgot to
+  // read — would take the whole council with it, mid-run, after the members were already paid for.
+  //
+  // fd 3 is written through an async stream now, with a BOUNDED queue: past the cap events are dropped
+  // and counted. That follows this module's stated rule rather than bending it — the stream is
+  // telemetry, the run is the product. A consumer that fell behind loses events and is told how many.
+  const probe = path.join(os.tmpdir(), `council-fd3-${process.pid}.mjs`);
+  fs.writeFileSync(probe, [
+    "import { spawn } from 'node:child_process';",
+    `const EVENTS = ${JSON.stringify(path.join(ROOT, 'scripts', 'events.mjs'))};`,
+    "const child = spawn(process.execPath, ['--input-type=module', '-e', `",
+    "  import { createEmitter } from '${EVENTS}';",
+    "  const em = createEmitter({ toFd: 3 });",
+    "  for (let i = 0; i < 20000; i++) em.emit('member_tick', { stage: '1', id: 'a', elapsedMs: i, bytes: 0, lastLine: 'x'.repeat(300) });",
+    "  console.log(JSON.stringify({ finished: true, dropped: em.dropped }));",
+    "  em.close();",
+    "  process.exit(0);",
+    "`], { stdio: ['ignore', 'pipe', 'pipe', 'pipe'] });",
+    "// fd 3 is deliberately NEVER read — the stalled-consumer case.",
+    "let out = '';",
+    "child.stdout.on('data', (d) => { out += d; });",
+    "child.stderr.on('data', () => {});",
+    "child.on('close', () => { console.log(out.trim() || '{}'); process.exit(0); });",
+    "setTimeout(() => { try { child.kill('SIGKILL'); } catch {} }, 15000);",
+  ].join('\n'));
+
+  const r = spawnSync('node', [probe], { encoding: 'utf8', timeout: 40_000 });
+  fs.rmSync(probe, { force: true });
+  let v = {};
+  try { v = JSON.parse((r.stdout ?? '').trim().split('\n').filter(Boolean).pop()); } catch { /* it hung */ }
+
+  check('a stalled fd-3 consumer does NOT block the run', v.finished === true,
+    v.finished ? '' : 'the emitter blocked and the child had to be killed');
+  check('...events are dropped rather than queued without limit', Number(v.dropped) > 0,
+    `dropped ${v.dropped} — a bounded queue is the point, not a perfect one`);
+  check('...and the drop count is reported, so a consumer knows it missed some',
+    Number.isFinite(Number(v.dropped)));
+
+  const src = fs.readFileSync(path.join(ROOT, 'scripts', 'events.mjs'), 'utf8');
+  check('fd 3 is written through a stream, not writeSync', /fs\.createWriteStream\(null, \{ fd: toFd/.test(src));
+  check('...with a bounded queue', /writableLength > FD_QUEUE_MAX/.test(src));
+  check('...and close() FLUSHES rather than destroying it', /fdStream\.end\(\)/.test(src),
+    'whatever is queued at the finish line includes the run_done a supervisor waits for');
+  check('the FILE sink stays synchronous, so a watcher sees events immediately',
+    /The FILE sink stays synchronous on purpose/.test(src));
+}
+
 // ── the CLI actually runs, end to end, with the flags it documents ───────────
 console.log('\n▸ Integration — the suite must run the CLI, not only import its parts');
 {

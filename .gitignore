@@ -1,0 +1,5 @@
+# council output — yours, not the package's
+.council/runs/
+node_modules/
+._*
+.DS_Store

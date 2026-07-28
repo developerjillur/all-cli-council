@@ -1,0 +1,99 @@
+{
+  "$comment": [
+    "The council. Every entry was verified by running it \u2014 command, flags, and a live round-trip.",
+    "",
+    "Latencies are a FLOOR measured on a one-word answer. A real question is minutes.",
+    "",
+    "Every member runs READ-ONLY and from a scratch directory outside your repo. They advise;",
+    "they never edit. Context is ASSEMBLED and passed in, never granted \u2014 read-only in these",
+    "CLIs means 'cannot write', not 'cannot read', so a member with repo access could read your",
+    ".env and your credentials.",
+    "",
+    "No API keys. Every member is a CLI you already have logged in.",
+    "",
+    "Override this file by creating .council/members.json in your own project."
+  ],
+  "scratchDir": "~/.nexa-council-scratch",
+  "members": [
+    {
+      "id": "codex",
+      "label": "GPT-5.6 sol (Codex CLI)",
+      "cmd": "codex",
+      "args": [
+        "exec",
+        "--sandbox",
+        "read-only",
+        "--skip-git-repo-check",
+        "-c",
+        "model_reasoning_effort=\"xhigh\"",
+        "{prompt}"
+      ],
+      "verified": "2026-07-28, 17s floor",
+      "note": "The other vendor already load-bearing in \u00a710. Reasoning effort pinned per skills/pick-the-model. --skip-git-repo-check is required because the scratch dir is deliberately not a repo \u2014 it relaxes a git check, NOT the sandbox, which stays read-only."
+    },
+    {
+      "id": "grok",
+      "label": "Grok 4.5",
+      "cmd": "grok",
+      "args": [
+        "-p",
+        "{prompt}",
+        "--output-format",
+        "plain",
+        "--reasoning-effort",
+        "high",
+        "--disable-web-search"
+      ],
+      "verified": "2026-07-28, 14s floor",
+      "note": "Only grok-4.5 is offered on this account. Web search off so the council reasons rather than retrieves."
+    },
+    {
+      "id": "gemini",
+      "label": "Gemini 3.1 Pro (Antigravity)",
+      "cmd": "agy",
+      "args": [
+        "-p",
+        "{prompt}",
+        "--mode",
+        "plan",
+        "--model",
+        "gemini-3.1-pro-high",
+        "--effort",
+        "high"
+      ],
+      "verified": "2026-07-28, 16s floor",
+      "note": "Reached via Antigravity (agy 1.1.7), NOT the gemini CLI \u2014 that one now refuses this account outright: 'no longer supported for Gemini Code Assist for individuals'. gemini-3.1-pro-high is the highest 3.1 tier offered; there is no -max."
+    },
+    {
+      "id": "claude-fable",
+      "label": "Fable 5",
+      "cmd": "claude",
+      "args": [
+        "--print",
+        "--model",
+        "fable",
+        "{prompt}"
+      ],
+      "verified": "2026-07-28",
+      "note": "A second Claude voice, deliberately not the chairman's."
+    },
+    {
+      "id": "claude-sonnet",
+      "label": "Sonnet 5",
+      "cmd": "claude",
+      "args": [
+        "--print",
+        "--model",
+        "sonnet",
+        "{prompt}"
+      ],
+      "verified": "2026-07-28",
+      "note": "Included as a COUNCIL member only. skills/pick-the-model rule 0 pins the top tier for work; a council is the one place a different vantage point is the product, and no council member's answer is adopted without the chairman's synthesis."
+    }
+  ],
+  "chairman": {
+    "id": "opus",
+    "label": "Opus 5 (this session)",
+    "note": "The chairman is whoever invoked the council \u2014 it reads the transcript and writes the synthesis in-session, so nothing is lost to a subprocess boundary. Pinned to opus by settings.json."
+  }
+}

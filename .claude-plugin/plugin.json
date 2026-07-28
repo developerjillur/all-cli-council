@@ -1,0 +1,22 @@
+{
+  "name": "all-cli-council",
+  "version": "1.0.0",
+  "description": "Ask five models across four vendors the same hard question, have them rank each other anonymously, then synthesise. Runs on the CLIs you already have — no API keys.",
+  "author": {
+    "name": "Jillur Rahman",
+    "url": "https://github.com/developerjillur"
+  },
+  "homepage": "https://github.com/developerjillur/all-cli-council",
+  "license": "MIT",
+  "keywords": [
+    "claude-code",
+    "multi-model",
+    "council",
+    "code-review",
+    "llm-as-judge",
+    "mixture-of-agents",
+    "codex",
+    "gemini",
+    "grok"
+  ]
+}

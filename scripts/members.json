@@ -1,99 +1,180 @@
 {
   "$comment": [
-    "The council. Every entry was verified by running it \u2014 command, flags, and a live round-trip.",
+    "The council. Every entry was verified by running it — command, flags, and a live round-trip.",
     "",
     "Latencies are a FLOOR measured on a one-word answer. A real question is minutes.",
     "",
     "Every member runs READ-ONLY and from a scratch directory outside your repo. They advise;",
-    "they never edit. Context is ASSEMBLED and passed in, never granted \u2014 read-only in these",
+    "they never edit. Context is ASSEMBLED and passed in, never granted — read-only in these",
     "CLIs means 'cannot write', not 'cannot read', so a member with repo access could read your",
     ".env and your credentials.",
     "",
     "No API keys. Every member is a CLI you already have logged in.",
     "",
-    "Override this file by creating .council/members.json in your own project."
+    "── promptVia: how the prompt reaches this member, and why it is per-member ──",
+    "",
+    "  stdin  written to the child's stdin. The args must NOT contain {prompt}.",
+    "  file    written to a 0600 file in the scratch dir; {promptFile} is substituted.",
+    "  argv    substituted into {prompt}. Size-checked against the platform limit and REFUSED",
+    "          rather than allowed to die as E2BIG mid-run.",
+    "",
+    "argv used to be the only path, and it was wrong two ways — both measured 2026-07-28:",
+    "Linux caps a single argv string at 131,072 bytes (160,000 → E2BIG), which is BELOW this",
+    "project's own 160,000-char context budget; and /proc/<pid>/cmdline is mode 444, so the whole",
+    "assembled pack was readable by every user on the box for the duration of the call.",
+    "",
+    "Do not change a promptVia without re-running `--verify-delivery`. A wrong value does not",
+    "error: `agy` given a prompt on stdin exits 0 and answers 'How can I help you today?' because",
+    "the prompt never arrived — a fluent answer to an empty question, which then gets ranked.",
+    "",
+    "── family: declared, not guessed ──",
+    "",
+    "The family-mix diagnostic used to infer the vendor from the member id, with 'Google' as the",
+    "fallback — so every member of a custom roster not named exactly `codex` or `grok` was",
+    "reported as Google. Declare it.",
+    "",
+    "Override this file by creating .council/members.json in your own project.",
+    "",
+    "── readOnlyBy: the flags that actually deliver the read-only guarantee ──",
+    "",
+    "The test used to assert read-only by pattern-matching the args for /read-only|plan|--print|-p$/.",
+    "That passed for the wrong reason (grok matched on a bare `-p`) and then broke the moment grok",
+    "moved to --prompt-file, even though nothing about its permissions had changed. A regex over",
+    "flags cannot tell a permission from a coincidence.",
+    "",
+    "So each member NAMES the flags that constrain it, and the test asserts those exact tokens are",
+    "still present in args. A declaration alone would be self-certifying; this one is checkable.",
+    "",
+    "-- contained: measured, never assumed --",
+    "",
+    "`contained` is written ONLY by scripts/verify-containment.mjs having demonstrated that the member",
+    "cannot write - a cwd probe and an absolute-path escape probe. Do not hand-edit it to true.",
+    "",
+    "council.mjs EXCLUDES an uncontained member by default. A four-member council that keeps the",
+    "package's promise is worth more than a five-member one that quietly breaks it."
   ],
   "scratchDir": "~/.nexa-council-scratch",
   "members": [
     {
       "id": "codex",
       "label": "GPT-5.6 sol (Codex CLI)",
+      "family": "OpenAI",
       "cmd": "codex",
+      "promptVia": "stdin",
       "args": [
         "exec",
         "--sandbox",
         "read-only",
         "--skip-git-repo-check",
-        "-c",
-        "model_reasoning_effort=\"xhigh\"",
-        "{prompt}"
+        "-"
       ],
-      "verified": "2026-07-28, 17s floor",
-      "note": "The other vendor already load-bearing in \u00a710. Reasoning effort pinned per skills/pick-the-model. --skip-git-repo-check is required because the scratch dir is deliberately not a repo \u2014 it relaxes a git check, NOT the sandbox, which stays read-only."
+      "verified": "2026-07-28, 17s floor; stdin round-trip verified with a canary",
+      "note": "The other vendor already load-bearing in §10. Reasoning effort pinned per skills/pick-the-model. --skip-git-repo-check is required because the scratch dir is deliberately not a repo — it relaxes a git check, NOT the sandbox, which stays read-only. The trailing `-` is documented as 'read instructions from stdin'.",
+      "readOnlyBy": [
+        "--sandbox",
+        "read-only"
+      ],
+      "contained": true,
+      "containmentVerified": "2026-07-28, scripts/verify-containment.mjs"
     },
     {
       "id": "grok",
       "label": "Grok 4.5",
+      "family": "xAI",
       "cmd": "grok",
+      "promptVia": "file",
       "args": [
-        "-p",
-        "{prompt}",
+        "--prompt-file",
+        "{promptFile}",
         "--output-format",
         "plain",
         "--reasoning-effort",
         "high",
-        "--disable-web-search"
+        "--disable-web-search",
+        "--permission-mode",
+        "plan"
       ],
-      "verified": "2026-07-28, 14s floor",
-      "note": "Only grok-4.5 is offered on this account. Web search off so the council reasons rather than retrieves."
+      "verified": "2026-07-28, 14s floor; --prompt-file round-trip verified with a canary",
+      "note": "Only grok-4.5 is offered on this account. Web search off so the council reasons rather than retrieves. --prompt-file is better than stdin here: no pipe, no argv, and the file is 0600 in the scratch dir and removed the moment the member exits. NOT CONTAINED. Measured 2026-07-28 by scripts/verify-containment.mjs: grok writes a file into its cwd AND to an arbitrary absolute path outside it. --permission-mode plan, --sandbox read-only, --tools <allowlist> and --disallowed-tools are all accepted without complaint and NONE of them stop it. It was previously listed as read-only because the roster test matched a bare `-p`, which is a prompt flag, not a permission. Excluded from the council by default; --allow-uncontained opts back in, and the run says so in its output and in the run file.",
+      "readOnlyBy": [],
+      "contained": false,
+      "containmentVerified": "2026-07-28, scripts/verify-containment.mjs"
     },
     {
       "id": "gemini",
       "label": "Gemini 3.1 Pro (Antigravity)",
+      "family": "Google",
       "cmd": "agy",
+      "promptVia": "argv",
       "args": [
-        "-p",
+        "--print",
         "{prompt}",
         "--mode",
         "plan",
         "--model",
         "gemini-3.1-pro-high",
         "--effort",
-        "high"
+        "high",
+        "--print-timeout",
+        "14m"
       ],
       "verified": "2026-07-28, 16s floor",
-      "note": "Reached via Antigravity (agy 1.1.7), NOT the gemini CLI \u2014 that one now refuses this account outright: 'no longer supported for Gemini Code Assist for individuals'. gemini-3.1-pro-high is the highest 3.1 tier offered; there is no -max."
+      "note": "Reached via Antigravity (agy 1.1.8), NOT the gemini CLI — that one now refuses this account outright: 'no longer supported for Gemini Code Assist for individuals'. gemini-3.1-pro-high is the highest 3.1 tier offered; there is no -max. THE ONLY argv-ONLY MEMBER: `agy` has no stdin path and no --prompt-file, and piping to it silently answers an empty prompt. So it is the one member that can be refused for prompt size on Linux, and the one whose prompt is visible in the process table. --print-timeout is pinned to 14m because it DEFAULTS TO 5m — under our 15m member timeout, so on a large context it would abort itself and be reported as a failure with no indication why.",
+      "readOnlyBy": [
+        "--mode",
+        "plan"
+      ],
+      "contained": true,
+      "containmentVerified": "2026-07-28, scripts/verify-containment.mjs"
     },
     {
       "id": "claude-fable",
       "label": "Fable 5",
+      "family": "Anthropic",
       "cmd": "claude",
+      "promptVia": "stdin",
       "args": [
         "--print",
         "--model",
         "fable",
-        "{prompt}"
+        "--permission-mode",
+        "plan"
       ],
-      "verified": "2026-07-28",
-      "note": "A second Claude voice, deliberately not the chairman's."
+      "verified": "2026-07-28; stdin round-trip verified with a canary",
+      "note": "A second Claude voice, deliberately not the chairman's.",
+      "readOnlyBy": [
+        "--permission-mode",
+        "plan"
+      ],
+      "contained": true,
+      "containmentVerified": "2026-07-28, scripts/verify-containment.mjs"
     },
     {
       "id": "claude-sonnet",
       "label": "Sonnet 5",
+      "family": "Anthropic",
       "cmd": "claude",
+      "promptVia": "stdin",
       "args": [
         "--print",
         "--model",
         "sonnet",
-        "{prompt}"
+        "--permission-mode",
+        "plan"
       ],
-      "verified": "2026-07-28",
-      "note": "Included as a COUNCIL member only. skills/pick-the-model rule 0 pins the top tier for work; a council is the one place a different vantage point is the product, and no council member's answer is adopted without the chairman's synthesis."
+      "verified": "2026-07-28; stdin round-trip verified with a canary",
+      "note": "Included as a COUNCIL member only. skills/pick-the-model rule 0 pins the top tier for work; a council is the one place a different vantage point is the product, and no council member's answer is adopted without the chairman's synthesis.",
+      "readOnlyBy": [
+        "--permission-mode",
+        "plan"
+      ],
+      "contained": true,
+      "containmentVerified": "2026-07-28, scripts/verify-containment.mjs"
     }
   ],
   "chairman": {
     "id": "opus",
     "label": "Opus 5 (this session)",
-    "note": "The chairman is whoever invoked the council \u2014 it reads the transcript and writes the synthesis in-session, so nothing is lost to a subprocess boundary. Pinned to opus by settings.json."
+    "note": "The chairman is whoever invoked the council — it reads the transcript and writes the synthesis in-session, so nothing is lost to a subprocess boundary. Pinned to opus by settings.json."
   }
 }

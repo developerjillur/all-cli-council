@@ -7,9 +7,12 @@
 [![node](https://img.shields.io/badge/node-%3E%3D22-brightgreen)](https://nodejs.org)
 [![dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)](#quick-start)
 [![API keys](https://img.shields.io/badge/API%20keys-none-brightgreen)](#the-members)
-[![tests](https://img.shields.io/badge/tests-54-blue)](tests/council.test.mjs)
+[![tests](https://img.shields.io/badge/tests-151-blue)](tests/council.test.mjs)
 
-**Five models. Four vendors. They rank each other blind. You decide.**
+**Four models. Three vendors. They rank each other blind. You decide.**
+
+<sub>Five and four until one member was measured able to write files. It is excluded by default,
+and that trade is [documented rather than hidden](#-three-of-five-members-could-write-files--while-a-test-said-they-could-not).</sub>
 
 [Quick start](#quick-start) · [How it activates](#how-it-activates) · [What makes it different](#what-makes-it-different) · [Members](#the-members) · [The brief](#the-brief--the-cheapest-quality-win-available) · [FAQ](#faq) · [Limits](#honest-limitations) · [Contributing](CONTRIBUTING.md)
 
@@ -95,7 +98,7 @@ A skill that fires eagerly on a 10–30 minute tool is worse than no skill at al
 
 | Do not | Because |
 |---|---|
-| the answer is **knowable** | it is in the code, a test, a log, or `grep`. Five models guessing is slower, worse, and **sounds more authoritative than one command that actually checks** |
+| the answer is **knowable** | it is in the code, a test, a log, or `grep`. A council guessing is slower, worse, and **sounds more authoritative than one command that actually checks** |
 | the question is a **preference** | naming, formatting, layout. There is no fact to find |
 | you are **stuck, not uncertain** | a council will not tell you what the user wants |
 | the choice is **uncomfortable rather than unclear** | you get a well-argued average and a decision nobody owns |
@@ -123,11 +126,18 @@ all-cli-council/
 │                                   runs when typed
 ├── commands/council.md          ← /council, the on-demand guarantee
 ├── scripts/
-│   ├── council.mjs              orchestration: 3 stages, bias maths, teardown
+│   ├── council.mjs              orchestration: stages, aggregation, teardown
 │   ├── context.mjs              the pack — containment, secret refusal, injection fencing
+│   ├── prompts.mjs              every prompt, incl. the lenses and the rubric
+│   ├── prompt-delivery.mjs      stdin / file / argv, and the platform limits
+│   ├── diagnostics.mjs          every number printed above a score
+│   ├── events.mjs               the NDJSON event stream + its reducer
+│   ├── render.mjs               the live view, TTY and non-TTY
+│   ├── watch.mjs                a second, independent consumer of the stream
+│   ├── verify-containment.mjs   proves each member cannot write
 │   ├── judge-output.mjs         is this an answer, or a CLI saying it cannot answer
 │   └── members.json             the roster. Override with .council/members.json
-├── tests/council.test.mjs       54 cases, spends nothing
+├── tests/council.test.mjs       151 cases, spends nothing
 └── .claude-plugin/              plugin + marketplace manifests
 ```
 
@@ -153,7 +163,7 @@ Verified from a clean clone installed as a plugin:
 ✅  --preflight resolves through $CLAUDE_PLUGIN_ROOT      5/5 members
 ✅  a real run writes into the USER project              .council/runs/
 ✅  nothing leaks into the plugin directory
-✅  54/54 tests pass from the installed copy
+✅  151/151 tests pass from the installed copy
 ```
 
 Cloned standalone instead? Use the path you cloned to in place of `$CLAUDE_PLUGIN_ROOT`.
@@ -178,6 +188,104 @@ using all day without noticing.
 ## What makes it different
 
 Everything below was **measured, not assumed.** The numbers are small-n and say so.
+
+### 🚨 Three of five members could write files — while a test said they could not
+
+The package's central promise is one sentence: **"members advise, they never edit."** It was
+enforced by a test that pattern-matched each member's flags for `/read-only|plan|--print|-p$/`
+and asserted a match.
+
+**That test passed. Three of the five members could write anyway.**
+
+| Member | What the test matched | Could it write? |
+|---|---|---|
+| `codex` | `--sandbox read-only` | no |
+| `agy` | `--mode plan` | no |
+| `claude` ×2 | `--print` | **yes** — wrote `PROOF.txt` into its cwd |
+| `grok` | a bare `-p` | **yes** — and to an arbitrary **absolute path** outside cwd |
+
+`--print` is an output format. A bare `-p` is a prompt flag. **Neither is a permission**, and a
+regex over flag strings cannot tell a permission from a coincidence.
+
+`claude` was fixed with `--permission-mode plan` — verified, the write is now refused. **`grok`
+could not be fixed by any flag it offers**: `--permission-mode plan`, `--sandbox read-only`,
+`--tools` and `--disallowed-tools` are all accepted without complaint and none of them stopped it.
+
+So the guarantee moved from a claim to a measurement:
+
+```bash
+node scripts/verify-containment.mjs      # two probes per member: cwd write, absolute-path escape
+```
+
+A member is marked `contained` only if that script demonstrated it cannot write, and **an
+uncontained member is excluded from the council by default.** `--allow-uncontained` opts back in,
+loudly, and the run file records that it happened.
+
+This matters more than tidiness. The pack every member receives is repository content, and a repo
+file can carry a sentence aimed at whoever reads it next. The injection fence is a *prompt-level*
+defence, and prompt-level defences are probabilistic. **The permission constraint was the backstop
+underneath it. For one member there was no backstop at all.**
+
+### 💥 The prompt travelled in `argv`, which broke Linux at this project's own context budget
+
+Linux caps a **single** argv string at `MAX_ARG_STRLEN` = 131,072 bytes, independently of the much
+larger total `ARG_MAX`. Measured in `node:22-alpine`:
+
+| one argv string | result |
+|---|---|
+| 131,000 chars | ok |
+| **160,000 chars** | **`E2BIG`** |
+
+`context.mjs` sets the pack budget at **160,000 chars**, and the brief adds up to 8,000 more. **A
+run at the budget this README advertises could not spawn a member on Linux at all** — and stage 2 is
+worse, because it appends every answer to the same string. macOS hid it completely: Darwin has no
+per-argument cap, and 1,000,000 chars succeeded there.
+
+The second problem is worse. On Linux `/proc/<pid>/cmdline` is mode **444**, measured — so the whole
+assembled pack was readable by **every user on the box** for the duration of the call. All the care
+in `context.mjs` about what leaves your machine, undone by the boring part.
+
+Now the prompt goes by the best channel each member offers, measured per CLI:
+
+| Member | Channel | |
+|---|---|---|
+| `codex exec -` | **stdin** | documented, and verified live |
+| `claude --print` | **stdin** | verified live |
+| `grok --prompt-file` | **file** | 0600 in the scratch dir, deleted the moment it exits |
+| `agy --print` | **argv** | the only one with no alternative — size-checked and **refused** rather than left to die as `E2BIG` mid-run |
+
+**And a wrong channel does not error.** Piping a prompt to `agy --print` **exits 0 and answers
+pleasantly** — *"How can I help you today?"* — because the prompt never arrived. A fluent answer to
+a question nobody asked, which then goes into the peer review and gets ranked against real answers.
+So:
+
+```bash
+node scripts/council.mjs --verify-delivery   # a unique canary per member; only the token counts
+```
+
+### 📊 Agreement is now measured, not just disclaimed
+
+Every run already said *"consensus is not correctness — they share training data."* True, and it was
+**prose**: you were told to discount agreement by an unknown amount, with no way to tell a run where
+members genuinely converged from one where they wrote the same paragraph five times.
+
+Raw lexical overlap does not work here, and the reason is specific to this council: **every member
+gets the same pack.** Five answers about `src/queue.js` share `retry`, `idempotent` and every
+identifier in the file, so raw similarity measures *the question*, not the reasoning.
+
+So **the subject matter is subtracted.** Every term appearing in the pack, the brief or the question
+is removed from all answers first; overlap is measured only on the vocabulary each member brought
+itself.
+
+```
+| Reasoning overlap — pack's own terms removed | 0.13 | lower is more independent | ok |
+| Raw overlap — before removing them           | 0.16 | — | shown so the correction is visible |
+```
+
+The 0.60 suspect threshold is **borrowed from [council-review](https://github.com/ngmeyer/council-review)
+and is not validated on this council.** It is printed as indicative, exactly like the verbosity
+correlation — which swung 0.64 / −0.18 / 0.53 / 0.06 across four runs, which is *why* it is printed
+rather than corrected.
 
 ### 🎭 Judges prefer their own answers — and anonymising does not stop it
 
@@ -269,19 +377,170 @@ At ~80k, Gemini 3.1 Pro **ignored the instruction and summarised instead.** It d
 like an answer. The budget sits at 40k, and an oversized file is **refused rather than
 trimmed**, because a member given half a file answers confidently about the half it has.
 
+### ⏱ You can watch it, from anywhere — and the reason it works this way is a measurement
+
+A run is 10–30 minutes. The old version printed nothing between *"Stage 1 — 5 members, in
+parallel"* and the first member finishing, because it logged on **completion**. The terminal was
+identical for a council that was working and one that had hung.
+
+The obvious fix is to relay each member's output as it arrives. **That was measured and it does not
+work.** Asking each CLI for 40 lines and timestamping every chunk on stdout:
+
+| CLI (plain output) | chunks | first byte arrives at | spread over the run |
+|---|:---:|---|:---:|
+| `codex` | 1 | 14.8s of 15.1s | 0% |
+| `claude` | 1 | 24.7s of 25.2s | 0% |
+| `agy` | 1 | 13.4s of 14.8s | 0% |
+| `grok` | 77 | 11.7s of 12.9s | 7% |
+
+**In plain mode every member is effectively buffered.** The first byte lands at 90–98% of the run,
+so byte-level progress tells you a member is nearly done about one second before it is done. That is
+not a progress indicator; it is a completion notice with extra steps.
+
+So progress is emitted by the **parent**, which needs no cooperation from anyone: it knows who
+started, when, and that they have not finished. **Elapsed time per member is the honest signal**, and
+it is available for free.
+
+```bash
+node scripts/council.mjs "<question>" --context src/thing.js --events
+```
+
+In the terminal that is a live block, one line per member, redrawn with a moving clock:
+
+```
+▸ Stage 1 — 5 member(s), in parallel. Minutes, not seconds.
+  ⠹ GPT-5.6 sol (Codex CLI)      2m14s
+  ✅ Sonnet 5                     37s · 4,102 chars
+  ⠹ Grok 4.5                     2m14s
+  ⠹ Gemini 3.1 Pro               2m14s · 1,204 chars in
+  ✅ Fable 5                      76s · 5,880 chars
+```
+
+**And the same bytes drive anything else.** `--events` writes append-only NDJSON — one line per
+event, no framing to get wrong — which a terminal, an editor extension, a web page or `jq` all
+consume identically:
+
+```bash
+node scripts/watch.mjs             # follow the newest run from another terminal, or another process
+```
+
+`watch.mjs` is a **second, independent consumer in its own process**, and it ships for a reason: a
+stream only its author can read is not an integration point, it is a log file with a schema
+attached. It rebuilds everything from the file, so a missing field breaks *this* rather than
+somebody's extension three weeks later. **Attaching late works** — the whole file is replayed before
+following, because "a run started twenty minutes ago" is exactly when someone wants to look.
+
+Building an editor extension or a web UI? Use `reduce()` from `scripts/events.mjs`. The reducer is
+the contract, and it is the one thing the live view, the watcher and the tests all share.
+
+```jsonc
+{"t":1004,"ev":"member_tick","stage":"1","id":"grok","elapsedMs":134000,"bytes":0,"lastLine":""}
+{"t":88095,"ev":"run_done","ok":true,"answered":5,"requested":5,"exitCode":0,"score":null}
+```
+
+**Nothing in an event carries prompt or file content** — counts, ids, durations, states. `lastLine`
+is the one exception and it is capped and scrubbed of anything credential-shaped. A run log that
+quietly contains the pack is the leak `context.mjs` exists to prevent, one layer up.
+
+`--json-events` sends the same stream to **fd 3** instead, for a parent process that wants it without
+a file: stderr belongs to the human, stdout carries the run-file path.
+
+### 🔬 Five models is one axis of diversity. `--lenses` adds a second
+
+The strongest objection to this council is in its own README: five models on overlapping training
+data agreeing is weak evidence. Four vendors buys less independence than the count suggests.
+
+[council-review](https://github.com/ngmeyer/council-review) argues the missing axis is not vendor but
+**method** — and [claude-council](https://github.com/amgadelgamal/claude-council) reaches the same
+place from the other side, getting genuinely different takes from personas with all-Claude members.
+A cross-vendor council can have both.
+
+```bash
+node scripts/council.mjs "<question>" --context src/q.js --lenses
+```
+
+| Lens | Method |
+|---|---|
+| **Inversion** | assume it already failed in production; work backwards to the decision that caused it |
+| **First principles** | decompose into atomic claims; mark each measured, sourced or assumed; attack the assumed |
+| **Analogy** | find where this is already solved — another subsystem, protocol, industry — and what it cost them |
+| **Naive outsider** | owe the conventions nothing; ask what an insider has stopped asking |
+| **Execution order** | ignore whether it is a good idea; build the dependency graph, name the step discovered late |
+
+Assigned deterministically from the question, and **rotated** — so a lens is a property of the run,
+not of a member, and any effect is not confounded with that member's own tendencies.
+
+**This is opt-in and unmeasured.** Nobody has shown here that lensed answers beat unlensed ones. What
+*is* measured is the reasoning-overlap number above, which is the instrument it would be tested
+with: if lenses work, distinctive-vocabulary overlap should fall. Shipping it on by default before
+that number exists would be the kind of confident untested claim this repo keeps a list of.
+
+### 🤔 Every member states its confidence, and what would change its mind
+
+Five members agreeing at 55% and five agreeing at 95% produce **the same tally** and very different
+evidence. The old output could not tell them apart.
+
+```
+| Confidence — members stating one | 5/5 | 5/5 | |
+| Mean confidence                  | 62% | —   | ⚠ agreement at low confidence is a request for more context |
+```
+
+Each answer ends with `CONFIDENCE: <0-100>` and `WOULD CHANGE MY MIND IF: <the observation that
+would flip you>`. The second line is often the most useful sentence in the file: it names the
+measurement to go and take. Absence is reported rather than defaulted — not answering is itself a
+signal, because complying is trivial.
+
+Stage 2 also asks for two things a ranking cannot carry, and they get their own section because **a
+synthesis destroys them first**:
+
+- `MINORITY VIEW WORTH KEEPING` — the best point made by only one member, even if ranked last
+- `WHAT IS LOST IF THE TOP ANSWER WINS` — what the leader gives up that a lower answer had
+
+### 📋 `--rubric` — grade a body of work out of 10, without the number being meaningless
+
+```bash
+node scripts/council.mjs "Grade this package" --context scripts/council.mjs README.md --rubric
+```
+
+Asked "rate this out of 10", a model returns something near 8 almost regardless of input, because
+that is what the request sounds like it wants. Three things are done about that:
+
+1. **Six named dimensions, scored separately** — correctness, security, robustness, honesty,
+   usability, design. A single overall number is the easiest thing to hedge.
+2. **A score below 8 needs a locatable defect** — file, function or line. *"Could be better
+   documented"* scores nothing. A 9 or 10 needs the opposite: say what you tried to break and could
+   not.
+3. **Median, not mean, with the range printed beside it.** One agreeable judge cannot lift the result
+   and one harsh judge cannot sink it — and **4,4,9,9,9 must not read like 8,9,9,9,9**, so the spread
+   is always shown. Dimensions are sorted worst-first, because that is the work.
+
+It also withholds marks for **unmeasured claims specifically** — this project's own standard applied
+to itself, which is the one a generic reviewer never applies.
+
 ---
 
 ## The members
 
-| Member | CLI | Where to get it |
-|---|---|---|
-| GPT-5.6 | `codex` | [openai/codex](https://github.com/openai/codex) |
-| Grok 4.5 | `grok` | [grok.com](https://grok.com) |
-| Gemini 3.1 Pro | `agy` | [Antigravity](https://antigravity.google) |
-| Fable 5 · Sonnet 5 | `claude` | [Claude Code](https://claude.com/claude-code) |
+| Member | CLI | Contained? | Where to get it |
+|---|---|---|---|
+| GPT-5.6 | `codex` | ✅ `--sandbox read-only` | [openai/codex](https://github.com/openai/codex) |
+| Gemini 3.1 Pro | `agy` | ✅ `--mode plan` | [Antigravity](https://antigravity.google) |
+| Fable 5 · Sonnet 5 | `claude` | ✅ `--permission-mode plan` | [Claude Code](https://claude.com/claude-code) |
+| Grok 4.5 | `grok` | 🚨 **no — excluded by default** | [grok.com](https://grok.com) |
 
-Override the roster with `.council/members.json` in your own project. Every entry must declare
-a read-only mode — **members advise, they never edit.**
+**So the default council is four members across three vendors, not five across four.** Grok cannot be
+prevented from writing by any flag it offers ([measured](#-three-of-five-members-could-write-files--while-a-test-said-they-could-not)),
+and this package promises the opposite. `--allow-uncontained` puts it back, loudly.
+
+That is a real loss — it costs a vendor — and it is the honest trade. Re-check on your own machine,
+because a CLI's flags change:
+
+```bash
+node scripts/verify-containment.mjs
+```
+
+Override the roster with `.council/members.json` in your own project. **`contained` is written by the
+verifier, not by hand** — a stale `true` there is worse than no field at all.
 
 ---
 
@@ -305,31 +564,47 @@ preferences"* will do more for answer quality than any flag in this repo.
 ## How a run looks
 
 ```
+▸ Excluded — cannot be prevented from writing, and this package promises otherwise:
+    🚨 Grok 4.5 (verify with: node scripts/verify-containment.mjs --members=grok)
+
 ▸ Brief    — AGENTS.md
 ▸ Context  — 2 file(s), ~13.1k tokens of ~40k budget
+▸ Delivery — Gemini 3.1 Pro can only be given the prompt through argv.
+             ~14,200 chars against this platform's ~900,000 limit
 
-▸ Stage 1 — 5 members, in parallel. Minutes, not seconds.
-  ✅ Sonnet 5 — 37s      ✅ GPT-5.6 sol — 49s     ✅ Gemini 3.1 Pro — 26s
-  ✅ Fable 5 — 76s       ✅ Grok 4.5 — 259s
+▸ Stage 1 — 4 member(s), in parallel. Minutes, not seconds.
+  ⠹ GPT-5.6 sol (Codex CLI)      2m14s
+  ✅ Sonnet 5                     37s · 4,102 chars
+  ⠹ Gemini 3.1 Pro               2m14s
+  ✅ Fable 5                      76s · 5,880 chars
 
-▸ Stage 1b — revision. Each member sees the others and answers again.   [--revise]
-
-▸ Stage 2 — anonymised peer review, each reviewer sees its own ordering.
+▸ Stage 2 — 4 member(s), anonymised peer review, each reviewer sees its own ordering
 
 ────────────────────────────────────────────────────────────────
-  5/5 answered.
+  4/4 answered.
+
+  Reasoning overlap: 0.21
+
 ▸ Written: .council/runs/<slug>.md
+           .council/runs/<slug>.json
+           .council/runs/<slug>.events.ndjson
 ```
+
+The member lines are **redrawn in place with a moving clock**, so a four-minute member looks alive
+rather than hung. In a pipe or in CI it degrades to append-only lines instead — a progress bar in a
+log file is worse than none.
 
 **Stage 3 is you.** The script stops after the peer review on purpose — a chairman running as a
 subprocess has lost the conversation that made the question worth asking.
 
-Three rules, written into every run file:
+Five rules, written into every run file:
 
 1. **Where they disagree is the output.** Record both sides; do not average them.
-2. **Consensus is not correctness.** They share training data, so agreement measures overlap as
-   much as truth.
-3. **Every number goes through your own verification**, however many members stated it.
+2. **Consensus is not correctness** — and the reasoning-overlap number tells you how much of this
+   run's agreement was five arguments rather than one.
+3. **A minority view may be overruled, but say what it cost.**
+4. **Every number goes through your own verification**, however many members stated it.
+5. **Weigh by confidence, not only by count.**
 
 ---
 
@@ -341,15 +616,24 @@ Three rules, written into every run file:
 | `--revise` | [Mixture-of-Agents](https://arxiv.org/abs/2406.04692) round: each member sees the others and answers again |
 | `--members=id,id` | run a subset — useful when one member is slow |
 | `--stage1-only` | opinions, no peer review |
-| `--preflight` | who is available. Costs nothing |
+| `--preflight` | who is available, and how each one receives its prompt. Costs nothing |
+| `--lenses` | give each member a different reasoning method. Opt-in, unmeasured |
+| `--rubric` | grade the context out of 10 across six dimensions, median-aggregated |
+| `--events[=path]` | write an NDJSON progress stream. `scripts/watch.mjs` follows it from anywhere |
+| `--json-events` | the same stream on fd 3, for a parent process |
+| `--no-live` | plain append-only output instead of the in-place block. Implied when not a TTY |
+| `--timeout=<min>` | per-member budget. Default 15 |
+| `--verify-delivery` | prove with a canary that every member actually receives its prompt |
+| `--allow-uncontained` | include a member measured able to write files. Recorded in the run file |
 
 Exit codes: **0** usable · **1** convened and nobody answered · **2** could not convene.
+`verify-containment.mjs` uses **3** for "a member can write", so CI can tell that apart.
 
 ---
 
 ## When *not* to use it
 
-- **A question with a knowable answer.** Read the code, run the test, `grep`. Five models
+- **A question with a knowable answer.** Read the code, run the test, `grep`. Four models
   guessing is slower, worse, and **sounds more authoritative**.
 - **Anything latency-sensitive.** A real run is 10–30 minutes.
 - **To avoid deciding.** A council produces material for a judgement, never the judgement. If
@@ -407,19 +691,29 @@ which is the failure mode this repo is built against.
 
 Listed because a tool that hides these is worth less than one without them.
 
-- **Nobody has measured whether a council beats one top-tier model.** The core premise is
-  borrowed, not tested. → [the experiment](CONTRIBUTING.md#the-one-experiment-this-needs-most)
+- **Nobody has measured whether a council beats one top-tier model.** The core premise is borrowed,
+  not tested. → [the experiment](CONTRIBUTING.md#the-one-experiment-this-needs-most)
+- **`--lenses` is unmeasured too.** The argument for method diversity is sound and borrowed; the
+  effect on *this* council is not established. Reasoning overlap is the instrument, and the
+  before/after has not been run.
+- **The 0.60 overlap threshold is borrowed, not validated here.** The metric is real and the number
+  is computed from your run; the line marking it "suspect" is somebody else's.
 - **The bias numbers are n=4 and n=5.** Enough to act on. Not enough to publish.
 - **Your synthesis is unmeasured.** The quality claim rests on a step nobody grades.
+- **Grok is excluded by default, so the default council is 4 members across 3 vendors.** Fewer
+  independent readers than the design wants, and one fewer training corpus.
+- **Containment was verified on macOS with these CLI versions.** A CLI can change its flags in a
+  point release, which is exactly why `verify-containment.mjs` ships rather than a claim.
 - **Model IDs age.** `gemini-3.1-pro-high`, `grok-4.5`, `gpt-5.6-sol` are pinned and will drift.
-- **Verified on one machine.** `--preflight` exists for exactly this reason.
+- **The E2BIG and `/proc/<pid>/cmdline` measurements are Linux-in-Docker**, not a bare-metal Linux
+  host. The constants are kernel-wide, but nobody has re-run them outside a container.
 
 ---
 
 ## Tests
 
 ```bash
-node tests/council.test.mjs     # 54 cases, spends nothing
+node tests/council.test.mjs     # 151 cases, spends nothing
 ```
 
 **Every case was demonstrated OPEN before it was closed** — absolute-path traversal, symlink
@@ -438,8 +732,19 @@ SIGTERM-resistant child that held the process open after the run had finished.
 - [x] Prompt-injection defence, verified live
 - [x] Never-hang teardown (process-group kill)
 - [x] Measured context ceiling
-- [ ] **Council vs single model, measured** ← the one that matters
+- [x] **Containment verified per member, not claimed** — and one member failed
+- [x] **Prompt off `argv`** — stdin/file, with the platform limit enforced
+- [x] **Live progress as a consumable event stream** — terminal, watcher, extension
+- [x] **Reasoning overlap measured**, with the shared subject matter subtracted
+- [x] Confidence and "what would change my mind" on every answer
+- [x] Minority view and its cost captured, not averaged away
+- [ ] **Council vs single model, measured** ← still the one that matters
+- [ ] **`--lenses` on vs off, measured by reasoning overlap** ← now possible, and cheap
 - [ ] Bias numbers at n≥30
+- [ ] A containment path for `grok` that does not depend on its flags
+- [ ] Per-vendor streaming JSON, so progress is token-level where the CLI allows it
+  (`claude --output-format stream-json` measured genuinely incremental: first event at 348ms,
+  spread over 92% of the run — the only one of the four)
 - [ ] Fresh-machine install verification
 - [ ] Model-ID staleness check
 - [ ] More members (Mistral, DeepSeek, local via Ollama)
@@ -449,11 +754,24 @@ SIGTERM-resistant child that held the process open after the run had finished.
 ## Credit
 
 The three-stage shape is [karpathy/llm-council](https://github.com/karpathy/llm-council) — a
-reimplementation on local CLIs with measured bias controls; **no code was copied.**
+reimplementation on local CLIs with measured bias controls; **no code was copied.** The event-stream
+idea is his too: his backend streams `stage1_start` / `stage1_complete` over SSE to a web front end,
+which is what made the silence here look like a bug rather than a limitation.
 
-The revision round is [Mixture-of-Agents](https://arxiv.org/abs/2406.04692). The bias taxonomy
-comes from the LLM-as-a-judge literature, including
+The revision round is [Mixture-of-Agents](https://arxiv.org/abs/2406.04692). The bias taxonomy comes
+from the LLM-as-a-judge literature, including
 [Justice or Prejudice?](https://arxiv.org/abs/2410.02736).
+
+**Method diversity, theatrical-consensus detection and dissent preservation** are
+[ngmeyer/council-review](https://github.com/ngmeyer/council-review)'s — the sharpest of these
+projects on *why* a same-family council converges, and the source of the 0.60 overlap threshold.
+[amgadelgamal/claude-council](https://github.com/amgadelgamal/claude-council) shows the same effect
+from the other direction: all-Claude members, genuinely different takes, from personas and isolated
+contexts. [dubs3c/council](https://github.com/dubs3c/council) contributes the "concern" action —
+letting a member escalate an issue *without* requiring consensus, which is friction that drives
+deliberation rather than premature agreement. [sherifkozman/the-llm-council](https://github.com/sherifkozman/the-llm-council)
+is where the `argv`-versus-stdin problem came from: it handles large prompts over stdin for Windows,
+which is the note that led to measuring `MAX_ARG_STRLEN` here and finding the Linux failure.
 
 ---
 

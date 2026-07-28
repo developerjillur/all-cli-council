@@ -1,5 +1,5 @@
 ---
-description: Put a hard question to five models across four vendors, anonymise, rank, then synthesise it yourself.
+description: Put a hard question to four models across three vendors, anonymise, rank, then synthesise it yourself.
 argument-hint: <the question> [--context <file>...]
 ---
 
@@ -18,10 +18,18 @@ Run the council on: **$ARGUMENTS**
    only what you send.
 
 ```bash
-node "$CLAUDE_PLUGIN_ROOT/scripts/council.mjs" "<question>" --context <file> [<file>...]
-node "$CLAUDE_PLUGIN_ROOT/scripts/council.mjs" "<question>" --context <file> --revise    # +MoA round
-node "$CLAUDE_PLUGIN_ROOT/scripts/council.mjs" "<question>" --preflight                  # who is available; free
+node "$CLAUDE_PLUGIN_ROOT/scripts/council.mjs" "<question>" --context <file>... --events
+node "$CLAUDE_PLUGIN_ROOT/scripts/council.mjs" "<question>" --context <f> --lenses   # +method diversity
+node "$CLAUDE_PLUGIN_ROOT/scripts/council.mjs" "<question>" --context <f> --revise   # +MoA round
+node "$CLAUDE_PLUGIN_ROOT/scripts/council.mjs" "Grade this" --context <f>... --rubric # score out of 10
+node "$CLAUDE_PLUGIN_ROOT/scripts/council.mjs" "<question>" --preflight               # who is here; free
+
+# then, in another terminal — a 20-minute run should not look like a hang
+node "$CLAUDE_PLUGIN_ROOT/scripts/watch.mjs"
 ```
+
+**Tell the user the `watch.mjs` command.** The progress is a per-member clock, redrawn live; the
+members themselves are buffered and cannot be streamed, so do not promise streaming text.
 
 ## Reading the result
 
@@ -29,8 +37,13 @@ node "$CLAUDE_PLUGIN_ROOT/scripts/council.mjs" "<question>" --preflight         
    form your own view first or you are synthesising their synthesis.
 2. **Where they disagree is the output.** Record both sides. Averaging five models produces
    something none of them would defend.
-3. **Read the bias diagnostics above the score.** Self-enhancement and verbosity are printed
-   every run, flagged when present.
+3. **Read the bias diagnostics above the score.** Self-enhancement, verbosity, family mix and
+   **reasoning overlap** are printed every run, flagged when present. Overlap is the measured form
+   of "consensus is not correctness" — the pack’s own vocabulary is subtracted, so what remains is
+   how much of the agreement was five arguments rather than one told five times.
+4. **Weigh by confidence.** Every answer ends with `CONFIDENCE:` and `WOULD CHANGE MY MIND IF:`.
+   Agreement at 55% is a request for more context, and that second line names the measurement.
+5. **Carry the minority view into the synthesis** even if you overrule it, and say what it cost.
 4. **Every number goes through your own verification**, however many members stated it.
 
 ## Then write the synthesis where the work is

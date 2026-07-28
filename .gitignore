@@ -3,3 +3,6 @@
 node_modules/
 ._*
 .DS_Store
+
+# Council runs are per-project output, not package content.
+.council/runs/

@@ -1,21 +1,49 @@
 ---
 name: council
-description: Put a decision to five models across four vendors, have them rank each other blind, then synthesise. Use in plan mode before committing to an approach; before an architecture, schema, security or concurrency decision that is expensive to reverse; when a review is uncertain or two reviewers disagree; before verifying that a design actually holds; and when about to ship something whose failure mode is data loss, a breach, or a production outage. Do NOT use for questions with a knowable answer — read the code, run the test, grep. Costs 10–30 minutes.
+description: Put a decision to four models across three vendors, have them rank each other blind, then synthesise. Use in plan mode before committing to an approach; before an architecture, schema, security or concurrency decision that is expensive to reverse; when a review is uncertain or two reviewers disagree; before verifying that a design actually holds; and when about to ship something whose failure mode is data loss, a breach, or a production outage. Do NOT use for questions with a knowable answer — read the code, run the test, grep. Costs 10–30 minutes.
 ---
 
 # The council
 
-**Five models, four vendors, three stages.** Every member answers alone, then ranks the others
+**Four models, three vendors, three stages** — five and four before one member was measured able
+to write files and excluded by default. Every member answers alone, then ranks the others
 **without knowing whose answer is whose**, then you synthesise. Runs on local CLIs — no API
 keys.
 
 ```bash
 # Installed as a plugin — $CLAUDE_PLUGIN_ROOT resolves to wherever it was installed.
 # Cloned standalone, use the path you cloned to instead.
-node "$CLAUDE_PLUGIN_ROOT/scripts/council.mjs" "<question>" --context <file>...   # the normal call
-node "$CLAUDE_PLUGIN_ROOT/scripts/council.mjs" "<question>" --context <f> --revise # +MoA round, 15 calls
-node "$CLAUDE_PLUGIN_ROOT/scripts/council.mjs" "x" --preflight                     # who is available; free
+node "$CLAUDE_PLUGIN_ROOT/scripts/council.mjs" "<question>" --context <file>... --events
+node "$CLAUDE_PLUGIN_ROOT/scripts/council.mjs" "<question>" --context <f> --lenses    # +method diversity
+node "$CLAUDE_PLUGIN_ROOT/scripts/council.mjs" "<question>" --context <f> --revise    # +MoA round
+node "$CLAUDE_PLUGIN_ROOT/scripts/council.mjs" "Grade this" --context <f>... --rubric # score /10
+node "$CLAUDE_PLUGIN_ROOT/scripts/council.mjs" "x" --preflight                        # who is here; free
 ```
+
+**Pass `--events`.** It writes `.council/runs/<slug>.events.ndjson`, one NDJSON line per event, and
+`node "$CLAUDE_PLUGIN_ROOT/scripts/watch.mjs"` follows it from any other terminal or process. On a
+10–30 minute run that is the difference between "four models are thinking" and "this has hung" —
+tell the user that command so they can watch instead of waiting blind.
+
+**A member's own output cannot be relayed** — measured, every CLI is buffered in plain mode and its
+first byte arrives at 90–98% of the run. The progress is a parent-side clock per member. Do not
+promise the user streaming text.
+
+## Two things to check before the first run on a machine
+
+Both are cheap, both catch a failure that otherwise looks like an answer:
+
+```bash
+node "$CLAUDE_PLUGIN_ROOT/scripts/verify-containment.mjs"   # can any member write? one currently can
+node "$CLAUDE_PLUGIN_ROOT/scripts/council.mjs" --verify-delivery   # does each prompt actually arrive?
+```
+
+- **Containment.** `grok` is excluded by default because it was measured writing to arbitrary
+  absolute paths and no flag it offers stops it. If a user asks why the council is four members and
+  not five, that is the answer. `--allow-uncontained` overrides it and the run file records that.
+- **Delivery.** A member whose prompt does not arrive **exits 0 and answers pleasantly.** `agy` given
+  a prompt on stdin replies "How can I help you today?" — a fluent answer to an empty question that
+  then gets ranked against real ones. The canary is the only thing that catches it.
 
 ## Invoke this automatically when
 
@@ -83,6 +111,15 @@ Then three rules, in the order they are usually ignored:
    much as truth. **Check the bias diagnostics printed above the score** — self-enhancement and
    verbosity are flagged when present.
 3. **Every number goes through your own verification**, however many members stated it.
+4. **Read the reasoning-overlap number.** It is the measured version of "consensus is not
+   correctness": the pack’s own vocabulary is subtracted, so what is left is how much of the
+   agreement was five arguments rather than one told five times.
+5. **Weigh by confidence, not only by count.** Every answer ends with `CONFIDENCE:` and
+   `WOULD CHANGE MY MIND IF:`. Five members agreeing at 55% is a request for more context, not a
+   decision — and the second line names the measurement to go and take.
+6. **Report the minority view even when you overrule it.** Stage 2 captures
+   `MINORITY VIEW WORTH KEEPING` and `WHAT IS LOST IF THE TOP ANSWER WINS` precisely because a
+   synthesis destroys them first.
 
 **Stage 3 is yours.** The script stops after the peer review deliberately: a chairman running
 as a subprocess has the answers and not the reason the question was asked.

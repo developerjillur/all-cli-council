@@ -1,7 +1,7 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "all-cli-council",
-  "description": "All CLI Council for Claude Code — five models, four vendors, anonymised peer review, no API keys.",
+  "description": "All CLI Council for Claude Code — four models, three vendors, anonymised peer review, measured containment, no API keys.",
   "owner": {
     "name": "Jillur Rahman",
     "url": "https://github.com/developerjillur"
@@ -9,7 +9,7 @@
   "plugins": [
     {
       "name": "all-cli-council",
-      "description": "Ask five models the same hard question, have them rank each other anonymously, then synthesise it yourself.",
+      "description": "Ask four models the same hard question, have them rank each other anonymously, then synthesise it yourself.",
       "source": "./",
       "category": "productivity"
     }

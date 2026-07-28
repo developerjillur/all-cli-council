@@ -7,7 +7,7 @@
 [![node](https://img.shields.io/badge/node-%3E%3D22-brightgreen)](https://nodejs.org)
 [![dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)](#quick-start)
 [![API keys](https://img.shields.io/badge/API%20keys-none-brightgreen)](#the-members)
-[![tests](https://img.shields.io/badge/tests-204-blue)](tests/council.test.mjs)
+[![tests](https://img.shields.io/badge/tests-249-blue)](tests/council.test.mjs)
 
 **Four models. Three vendors. They rank each other blind. You decide.**
 
@@ -131,13 +131,15 @@ all-cli-council/
 │   ├── prompts.mjs              every prompt, incl. the lenses and the rubric
 │   ├── prompt-delivery.mjs      stdin / file / argv, and the platform limits
 │   ├── diagnostics.mjs          every number printed above a score
+│   ├── safe-write.mjs           the ONE place this package writes anything
+│   ├── ansi.mjs                 the two escape sequences, without a control byte in source
 │   ├── events.mjs               the NDJSON event stream + its reducer
 │   ├── render.mjs               the live view, TTY and non-TTY
 │   ├── watch.mjs                a second, independent consumer of the stream
 │   ├── verify-containment.mjs   proves each member cannot write
 │   ├── judge-output.mjs         is this an answer, or a CLI saying it cannot answer
 │   └── members.json             the roster. Override with .council/members.json
-├── tests/council.test.mjs       204 cases, spends nothing
+├── tests/council.test.mjs       249 cases, spends nothing
 └── .claude-plugin/              plugin + marketplace manifests
 ```
 
@@ -163,7 +165,7 @@ Verified from a clean clone installed as a plugin:
 ✅  --preflight resolves through $CLAUDE_PLUGIN_ROOT      5/5 members
 ✅  a real run writes into the USER project              .council/runs/
 ✅  nothing leaks into the plugin directory
-✅  204/204 tests pass from the installed copy
+✅  249/249 tests pass from the installed copy
 ```
 
 Cloned standalone instead? Use the path you cloned to in place of `$CLAUDE_PLUGIN_ROOT`.
@@ -610,7 +612,88 @@ not: 160,000 chars is ~40k tokens and the verified-obedient point is 27k. **The 
 never been probed** — the true boundary is unknown, and the comment now says so instead of implying
 a measurement that does not exist.
 
-**Tests: 54 → 204.** Every case above is one of them.
+**Tests: 54 → 204 this round.** Every case above is one of them.
+
+---
+
+## Round two: 6.5/10, and three judges found the same hole
+
+Score went 5.0 → **6.5** (range 5–7). Weakest dimension: `security` at 5.0. What makes this round
+worth reading is the convergence — **three of four judges independently named the same defect**, and
+it was in the previous round's *fix*.
+
+The symlink guard added for the run files covered the `.md` and the `.json`. It did not cover
+`--events`, which is opened at **startup** and written to for the whole run. And where it did run it
+was too shallow: `lstat` on a leaf answers *"is this a symlink"*, not *"does this resolve inside the
+workspace"* — so a symlinked `.council/runs/` redirected every file in it while each leaf check came
+back clean, because the leaves did not exist yet.
+
+Their unanimous recommendation was one boundary rather than a third patch, so
+[`safe-write.mjs`](scripts/safe-write.mjs) is now the only way this package writes anything: leaf
+*and* resolved parent, checked before the emitter opens.
+
+### The one that silently corrupted the work under review
+
+```js
+member.args.map((a) => a.replace('{prompt}', prompt))
+```
+
+`String.replace` expands `$&`, `` $` ``, `$'` and `$1` **in the replacement** — and the replacement
+is source code. Measured:
+
+| sent | arrived |
+|---|---|
+| `s.replace(/x/, '$&$&')` | `s.replace(/x/, '{prompt}{prompt}')` |
+| `` $` `` and `$'` | deleted |
+
+**The council was grading corrupted copies of any file containing a regex replacement**, with no
+sign anything was wrong. A replacer function is never pattern-expanded.
+
+### The one that reported success on failure
+
+The shutdown handler's exit timer was `unref`'d — which means it does not hold the event loop open.
+With nothing else pending, node exited **normally, code 0**, before the SIGKILL sweep and
+`process.exit(code)` inside it ever ran. A council that died of an uncaught error told its caller it
+had succeeded.
+
+### Security — the weakest dimension, at 5.0
+
+| Defect | Why it mattered |
+|---|---|
+| **`code/` and `plan/` were implicit containment roots** | a repo shipping `code` as a symlink to `/` made the entire filesystem "inside the workspace" — the realpath guard resolved the link, then compared against the resolved link. Extra roots are operator-supplied now |
+| **A brief could be a symlink** | `AGENTS.md` pointing at `~/.aws/credentials` was read, trusted, and prepended to every prompt |
+| **`contained` failed *open*** | `m.contained !== false` treated an undefined field as contained, so any roster omitting it was trusted. Absence means nobody ran the verifier |
+| **Failed answers were unredacted in the run file** | the event stream's copy was fixed and the durable one was not — the worse of the two places to leave it |
+| **A file containing ``` broke the data fence** | everything after it reached the member as prose rather than quoted data, so "this is DATA" silently stopped applying |
+
+### Correctness, robustness, honesty
+
+| Defect | |
+|---|---|
+| `familyMix` used `>`, so **exactly half was "ok"** | and the default roster is Anthropic 2 of 4. The diagnostic warning about a lopsided council was structurally silent on the shipped configuration |
+| A quota failure on **stderr** was ignored whenever stdout had text | a partial answer plus "you have reached your usage limit" was ranked as a considered opinion |
+| One terse member voided the overlap metric **for everybody** | `thin` was `some()`. Now the terse member is excluded and reported |
+| Stage 2's prompt was never size-checked | it is categorically the largest of the run — the same preamble *plus* every answer |
+| A member's self-timeout was a literal `14m` | so `--timeout=30` left a member that still quit at 14 minutes, reported as a plain failure. `{timeoutMin}` is substituted now |
+| A failed review still contributed its "minority view" | a CLI's error message, in the section a chairman is told to weigh most carefully |
+| An interrupt could leave a prompt file on disk | that file is the entire context pack |
+| `--json-events` failed silently while `--events` failed loudly | the package's own rule applied to one sink and not the other |
+| A roster without `scratchDir` crashed with a raw `TypeError` | before any handler was installed |
+| An absent member rendered as **"queued"** for the whole run | the `'absent'` state the renderer filters on was never set |
+| `--members codex` swallowed its value into the question | changing the roster and the question at once, silently |
+| `resolveCmd`'s comment promised a report no code produced | now it produces it |
+
+### And the canary was punishing the members with the best instincts
+
+The delivery probe said *"Reply with exactly this line and nothing else."* Sonnet 5 read that as
+injection-shaped — correctly — and answered *"This appears to be a prompt injection attempt."* The
+tool reported **"NO CANARY — the prompt is not arriving"** on a channel that worked perfectly.
+
+A false negative, in the one feature whose entire purpose is not producing false negatives. The probe
+now explains what it is and why, and `--verify-delivery` reports **three** outcomes rather than two —
+*returned*, *declined* (so it clearly did arrive; nothing to fix), *absent*. Verified live: 4/4.
+
+**Tests: 204 → 249.**
 
 ---
 
@@ -813,7 +896,7 @@ Listed because a tool that hides these is worth less than one without them.
 ## Tests
 
 ```bash
-node tests/council.test.mjs     # 204 cases, spends nothing
+node tests/council.test.mjs     # 249 cases, spends nothing
 ```
 
 **Every case was demonstrated OPEN before it was closed** — absolute-path traversal, symlink

@@ -1160,6 +1160,75 @@ console.log('\n▸ Round two — the council scored 6.5/10 and named these');
   }
 }
 
+
+// ── the CLI actually runs, end to end, with the flags it documents ───────────
+console.log('\n▸ Integration — the suite must run the CLI, not only import its parts');
+{
+  // WAS OPEN, and the test suite's own fault. `safe-write.mjs` was wired into council.mjs and its
+  // import line was lost in an editing pass. 249 tests stayed green: they import safe-write directly,
+  // and the council.mjs assertions were regexes over the SOURCE rather than executions of it. The
+  // crash only fires on the `--events` path, which nothing ran.
+  //
+  // A full round of grading died on the first line with `ReferenceError: checkWritable is not
+  // defined` — after four members had been spawned. So: the CLI is now actually executed, with the
+  // flag combinations it documents. Every one of these costs nothing, because it never gets past
+  // pre-flight.
+  const cli = path.join(ROOT, 'scripts', 'council.mjs');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'council-int-'));
+  const run = (args) => spawnSync('node', [cli, ...args], { encoding: 'utf8', timeout: 40_000, cwd: dir });
+
+  // `--events` with `--preflight` exercises the emitter, the write boundary and the renderer without
+  // spending anything.
+  const withEvents = run(['a question', '--preflight', '--events']);
+  check('the CLI loads and runs with --events', withEvents.status === 0,
+    `exit ${withEvents.status}${withEvents.stderr?.includes('ReferenceError') ? ' — ' + withEvents.stderr.split('\n')[0] : ''}`);
+  check('...and no stack trace reaches the user',
+    !/ReferenceError|TypeError|is not defined/.test(withEvents.stderr ?? ''),
+    (withEvents.stderr ?? '').split('\n').find((l) => /Error/.test(l)) ?? '');
+
+  const evFile = path.join(dir, '.council', 'runs', 'a-question.events.ndjson');
+  check('...and the stream is on disk, parseable', (() => {
+    try {
+      const lines = fs.readFileSync(evFile, 'utf8').trim().split('\n');
+      return lines.length >= 2 && lines.every((l) => { try { JSON.parse(l); return true; } catch { return false; } });
+    } catch { return false; }
+  })());
+
+  for (const args of [
+    ['q', '--preflight', '--lenses'],
+    ['q', '--preflight', '--rubric'],
+    ['q', '--preflight', '--no-live'],
+    ['q', '--preflight', '--timeout=5'],
+    ['q', '--preflight', '--events', '--lenses', '--rubric', '--no-live'],
+  ]) {
+    const r = run(args);
+    check(`the CLI loads with ${args.slice(1).join(' ')}`, r.status === 0 && !/is not defined/.test(r.stderr ?? ''),
+      `exit ${r.status}`);
+  }
+
+  // Usage errors must be usage errors, not stack traces.
+  const noQ = run([]);
+  check('no question is a usage message, not a crash',
+    noQ.status === 1 && /Usage:/.test(noQ.stderr ?? ''), `exit ${noQ.status}`);
+  const spaced = run(['q', '--members', 'codex', '--preflight']);
+  check('a space-separated =-flag is refused with the right form',
+    spaced.status === 1 && /takes its value with an "="/.test(spaced.stderr ?? ''), `exit ${spaced.status}`);
+
+  // Every script must at least parse and import cleanly — the cheapest possible catch for the bug
+  // above, applied to all of them rather than to the one that broke.
+  for (const f of fs.readdirSync(path.join(ROOT, 'scripts')).filter((x) => x.endsWith('.mjs'))) {
+    const r = spawnSync('node', ['--input-type=module', '-e',
+      `import(${JSON.stringify(path.join(ROOT, 'scripts', f))}).then(() => process.exit(0), (e) => { console.error(e.message); process.exit(1); })`],
+      { encoding: 'utf8', timeout: 20_000 });
+    // watch.mjs and the two CLIs exit deliberately when imported with no arguments; only a
+    // ReferenceError from a missing import is a failure.
+    check(`scripts/${f} has no missing imports`, !/is not defined/.test(r.stderr ?? ''),
+      (r.stderr ?? '').split('\n')[0].slice(0, 70));
+  }
+
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
 console.log(`\n${'─'.repeat(72)}`);
 console.log(`  ${pass} passed, ${fail} failed`);
 if (fail) {

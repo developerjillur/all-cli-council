@@ -51,6 +51,7 @@ import { fileURLToPath } from 'node:url';
 import { buildContext, loadBrief, VERIFIED_OBEDIENT_TOKENS } from './context.mjs';
 import { judgeOutput } from './judge-output.mjs';
 import { createEmitter, redactLine, SCHEMA } from './events.mjs';
+import { checkWritable, safeWrite } from './safe-write.mjs';
 import { createRenderer } from './render.mjs';
 import { prepare, deliveryOf, canary, argvCeiling } from './prompt-delivery.mjs';
 import { borda, verbosityR, familyMix, reasoningOverlap, parseConfidence, parseRubric,

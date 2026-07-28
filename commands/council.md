@@ -18,9 +18,9 @@ Run the council on: **$ARGUMENTS**
    only what you send.
 
 ```bash
-node scripts/council.mjs "<question>" --context <file> [<file>...]
-node scripts/council.mjs "<question>" --context <file> --revise    # +MoA round
-node scripts/council.mjs "<question>" --preflight                  # who is available; free
+node "$CLAUDE_PLUGIN_ROOT/scripts/council.mjs" "<question>" --context <file> [<file>...]
+node "$CLAUDE_PLUGIN_ROOT/scripts/council.mjs" "<question>" --context <file> --revise    # +MoA round
+node "$CLAUDE_PLUGIN_ROOT/scripts/council.mjs" "<question>" --preflight                  # who is available; free
 ```
 
 ## Reading the result

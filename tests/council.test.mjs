@@ -28,6 +28,29 @@ import { assignLenses, LENSES, stage1, stage2, rubric, rubric1b, RUBRIC_DIMENSIO
 import { judgeOutput, MIN_ANSWER_CHARS } from '../scripts/judge-output.mjs';
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+
+/**
+ * Did the CLI LOAD and parse its flags — whether or not any member CLI exists on this machine?
+ *
+ * **Exit 2 is a correct answer, not a failure.** It means "could not convene": no member CLI is
+ * installed. That is the state of every CI runner and every fresh machine. Ten integration tests
+ * asserted `status === 0`, so they passed on the author's laptop and failed everywhere else — which
+ * is precisely the mistake the convening section below already records CI catching once before:
+ *
+ *     "the first version asserted exit 0, which is right on a developer machine and WRONG on a CI
+ *      runner, where no member CLI is installed and exit 2 is the correct answer."
+ *
+ * Written down as a helper this time, so the next test cannot quietly repeat it. What these cases
+ * actually verify is that the process got far enough to make a decision, rather than dying on a bad
+ * import or a malformed flag — so the check is a sane exit code AND nothing crash-shaped on stderr.
+ */
+const CRASH = /ReferenceError|TypeError|SyntaxError|is not defined|is not a function/;
+const loadsCleanly = (r) => (r.status === 0 || r.status === 2) && !CRASH.test(r.stderr ?? '');
+
+/** A useful detail line: the crash if there was one, otherwise the exit code. */
+const crashed = (r) => (CRASH.test(r.stderr ?? '')
+  ? (r.stderr ?? '').split('\n').find((l) => /Error/.test(l))
+  : `exit ${r.status}`);
 let pass = 0, fail = 0;
 const check = (name, ok, detail = '') => {
   console.log(`  ${ok ? '✅' : '❌'} ${name}${detail ? ` — ${detail}` : ''}`);
@@ -443,11 +466,37 @@ console.log('\n▸ Events — the progress a UI consumes, and the reducer that r
   check('a status line is length-capped', redactLine('y'.repeat(500)).length <= 120);
 
   // Telemetry must never be able to kill a 20-minute council.
-  const bad = createEmitter({ file: '/proc/definitely/not/writable/x.ndjson' });
-  let threw = false;
-  try { bad.emit('run_start', {}); bad.close(); } catch { threw = true; }
-  check('an unwritable sink never throws mid-run', !threw);
-  check('...but it is reported, so --events can fail loudly', bad.broken !== null);
+  //
+  // **This test used to HANG THE WHOLE SUITE on Linux, and CI is what found it.** The path was
+  // `/proc/definitely/not/writable/x.ndjson`, and `fs.mkdirSync(..., { recursive: true })` under procfs
+  // does not throw EACCES on Linux — it blocks forever. macOS throws immediately, so the suite ran in
+  // 2 seconds locally and timed out at 10 minutes on ubuntu-latest.
+  //
+  // That was a real product bug, not only a test bug: a user passing `--events=/proc/x/y.ndjson` would
+  // have hung the council before a single member started, in a package whose central robustness claim
+  // is that it cannot hang. `checkWritable` now verifies the parent is a writable directory with a
+  // non-blocking `access` before anything blocking is attempted.
+  //
+  // Run in a SUBPROCESS with a hard timeout, so a regression shows up as a failed check rather than as
+  // a suite that never finishes — which is how this one hid.
+  {
+    const probe = path.join(os.tmpdir(), `council-hangprobe-${process.pid}.mjs`);
+    fs.writeFileSync(probe, [
+      `import { createEmitter } from '${path.join(ROOT, 'scripts', 'events.mjs')}';`,
+      "const e = createEmitter({ file: '/proc/definitely/not/writable/x.ndjson' });",
+      "let threw = false;",
+      "try { e.emit('run_start', {}); e.close(); } catch { threw = true; }",
+      "console.log(JSON.stringify({ threw, broken: e.broken !== null }));",
+    ].join('\n'));
+    const r = spawnSync('node', [probe], { encoding: 'utf8', timeout: 20_000 });
+    fs.rmSync(probe, { force: true });
+    check('an unwritable sink is refused instead of HANGING', r.signal !== 'SIGTERM' && r.status === 0,
+      r.signal ? `killed by ${r.signal} — recursive mkdir under /proc blocks forever on Linux` : `exit ${r.status}`);
+    let v = {};
+    try { v = JSON.parse((r.stdout ?? '').trim().split('\n').pop()); } catch { /* it hung or crashed */ }
+    check('...and never throws mid-run', v.threw === false);
+    check('...and it is reported, so --events can fail loudly', v.broken === true);
+  }
 
   fs.rmSync(dir, { recursive: true, force: true });
 }
@@ -1288,8 +1337,8 @@ console.log('\n▸ Round three — 7.0/10, and two of these were regressions fro
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'council-bareev-'));
     const r = spawnSync('node', [path.join(ROOT, 'scripts', 'council.mjs'), '--events', 'a real question', '--preflight'],
       { encoding: 'utf8', timeout: 40_000, cwd: dir });
-    check('a bare --events before the question is accepted', r.status === 0,
-      `exit ${r.status} — the guard used to reject it and suggest something wrong`);
+    check('a bare --events before the question is accepted', loadsCleanly(r),
+      `${crashed(r)} — the guard used to reject it and suggest something wrong`);
     fs.rmSync(dir, { recursive: true, force: true });
   }
 
@@ -1444,7 +1493,8 @@ console.log('\n▸ Round five — 7.3/10, and the entry point was the last silen
       /different question in a different mode/.test(split.stderr ?? ''),
       'a wrong answer reported as success is the outcome this project ranks worst');
     check('a genuinely unknown flag is refused too', run(['q', '--nope', '--preflight']).status === 1);
-    check('...while every real flag still works', run(['q', '--preflight', '--lenses', '--rubric', '--no-live']).status === 0);
+    check('...while every real flag still works',
+      loadsCleanly(run(['q', '--preflight', '--lenses', '--rubric', '--no-live'])));
 
     // --context swallows every following word, so an unquoted question after it becomes file paths.
     const swallowed = run(['--context', 'README.md', 'and', 'is', 'this', 'safe']);
@@ -1561,7 +1611,7 @@ console.log('\n▸ Round five — 7.3/10, and the entry point was the last silen
     const target = path.join(dir, 'explicit.ndjson');
     const r = spawnSync('node', [path.join(ROOT, 'scripts', 'council.mjs'), 'q', '--preflight', `--events=${target}`],
       { encoding: 'utf8', timeout: 40_000, cwd: ROOT });
-    check('an explicit --events path outside the workspace is honoured', r.status === 0, `exit ${r.status}`);
+    check('an explicit --events path outside the workspace is honoured', loadsCleanly(r), crashed(r));
     check('...and the stream is written there', fs.existsSync(target));
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -1637,7 +1687,7 @@ console.log('\n▸ Round six — 7.3/10, and one line closed a silent-corruption
     const r = spawnSync('node', [path.join(ROOT, 'scripts', 'council.mjs'),
       'is README.md stale?', '--context', 'README.md', '--preflight'],
       { encoding: 'utf8', timeout: 40_000, cwd: dir });
-    check('a question word matching a context filename survives', r.status === 0, `exit ${r.status}`);
+    check('a question word matching a context filename survives', loadsCleanly(r), crashed(r));
     fs.rmSync(dir, { recursive: true, force: true });
   }
 
@@ -1738,8 +1788,7 @@ console.log('\n▸ Integration — the suite must run the CLI, not only import i
   // `--events` with `--preflight` exercises the emitter, the write boundary and the renderer without
   // spending anything.
   const withEvents = run(['a question', '--preflight', '--events']);
-  check('the CLI loads and runs with --events', withEvents.status === 0,
-    `exit ${withEvents.status}${withEvents.stderr?.includes('ReferenceError') ? ' — ' + withEvents.stderr.split('\n')[0] : ''}`);
+  check('the CLI loads and runs with --events', loadsCleanly(withEvents), crashed(withEvents));
   check('...and no stack trace reaches the user',
     !/ReferenceError|TypeError|is not defined/.test(withEvents.stderr ?? ''),
     (withEvents.stderr ?? '').split('\n').find((l) => /Error/.test(l)) ?? '');
@@ -1760,8 +1809,7 @@ console.log('\n▸ Integration — the suite must run the CLI, not only import i
     ['q', '--preflight', '--events', '--lenses', '--rubric', '--no-live'],
   ]) {
     const r = run(args);
-    check(`the CLI loads with ${args.slice(1).join(' ')}`, r.status === 0 && !/is not defined/.test(r.stderr ?? ''),
-      `exit ${r.status}`);
+    check(`the CLI loads with ${args.slice(1).join(' ')}`, loadsCleanly(r), crashed(r));
   }
 
   // Usage errors must be usage errors, not stack traces.

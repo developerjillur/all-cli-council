@@ -42,6 +42,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { checkWritable, mkdirpSafe } from './safe-write.mjs';
 
 /** Bump when a field changes meaning. A consumer that cannot read this must say so, not guess. */
 export const SCHEMA = 1;
@@ -106,11 +107,18 @@ export function createEmitter({ file = null, toFd = null } = {}) {
 
   if (file) {
     try {
+      // Guarded by the same boundary the run files use, and for a reason CI found: on Linux,
+      // `fs.mkdirSync('/proc/a/b', { recursive: true })` **hangs forever** instead of throwing. This
+      // module is exercised directly by the tests and by any future caller, so it cannot rely on
+      // council.mjs having checked first — the check has to be here, where the blocking call is.
+      const w = checkWritable(file, path.parse(path.resolve(file)).root);
+      if (!w.ok) throw new Error(w.reason);
+
       // WAS OPEN: this computed the directory with a regex that requires a slash, so
       // `--events=run.ndjson` produced "run.ndjson" as the DIRECTORY name, created it, and then
       // failed to open the file — with --events treated as fatal, the run refused to start at all.
       // path.dirname returns "." for a bare filename, which is what was meant.
-      fs.mkdirSync(path.dirname(file), { recursive: true });
+      mkdirpSafe(path.dirname(file));
 
       // `'w'`, not `'a'`. **One file is one run.**
       //

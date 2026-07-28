@@ -57,6 +57,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { mkdirpSafe } from './safe-write.mjs';
 
 /**
  * The real per-argument ceiling, by platform, with headroom.
@@ -158,7 +159,8 @@ export function prepare(member, prompt, scratch, platform = process.platform, su
     // and for longer, exactly the exposure argv had.
     const f = path.join(scratch, `prompt-${member.id}-${crypto.randomUUID()}.txt`);
     try {
-      fs.mkdirSync(scratch, { recursive: true });
+      // Bounded, non-recursive: a roster-supplied scratchDir under procfs hangs a recursive mkdir.
+      mkdirpSafe(scratch);
       fs.writeFileSync(f, prompt, { mode: 0o600 });
     } catch (e) {
       return { ok: false, via, reason: `could not write the prompt file for ${member.id}: ${e.message}` };

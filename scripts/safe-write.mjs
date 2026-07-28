@@ -86,7 +86,59 @@ export function checkWritable(target, root) {
       + `\`${path.relative(root, checked) || checked}\` resolves to ${real}. Refusing — a symlinked `
       + `parent directory redirects every file in it, and the leaf looks innocent.` };
   }
+
+  // The deepest existing ancestor has to be a directory, or there is nowhere to put the file.
+  try {
+    if (!fs.statSync(real).isDirectory()) {
+      return { ok: false, reason: `${path.relative(root, abs)} cannot be created: \`${real}\` is not a `
+        + `directory, so there is nowhere to put it.` };
+    }
+  } catch {
+    return { ok: false, reason: `${path.relative(root, abs)} cannot be created: \`${real}\` is not `
+      + `readable as a directory.` };
+  }
+
   return { ok: true, path: abs };
+}
+
+/**
+ * Create `dir` and any missing parents — **without `{ recursive: true }`**, and this is not a style
+ * preference.
+ *
+ * `fs.mkdirSync(dir, { recursive: true })` **HANGS FOREVER** on Linux for a path under procfs. CI is
+ * what found it: the suite ran in 2 seconds on macOS and timed out at 10 minutes on ubuntu-latest,
+ * because one test used `/proc/definitely/not/writable/x.ndjson` as a deliberately-unwritable path.
+ *
+ * Measured in `node:22` as root:
+ *
+ *     access('/proc', W_OK)                        succeeds — root bypasses the permission check,
+ *                                                  so no amount of checking first catches this
+ *     mkdirSync('/proc/xyz')                       throws ENOENT immediately
+ *     mkdirSync('/proc/a/b', {recursive: true})    never returns
+ *
+ * So the guard cannot be a pre-check — it has to be avoiding the call. Creating one component at a
+ * time with plain `mkdirSync` fails fast with the real errno, and the loop is bounded by the number of
+ * path components, so it cannot spin.
+ *
+ * Why this matters beyond a test: a user passing `--events=/proc/x/y.ndjson` would have hung the
+ * council **before a single member started**, in a package whose central robustness claim is that it
+ * cannot hang.
+ */
+export function mkdirpSafe(dir) {
+  const abs = path.resolve(dir);
+  const parts = abs.split(path.sep).filter(Boolean);
+  let cur = path.sep;
+  for (const part of parts) {
+    cur = path.join(cur, part);
+    try {
+      fs.mkdirSync(cur);
+    } catch (e) {
+      // Already there is the normal case for every leading component.
+      if (e.code === 'EEXIST') continue;
+      throw e;                       // ENOENT, EACCES, ENOTDIR — fail fast with the real reason
+    }
+  }
+  return abs;
 }
 
 /**
@@ -97,7 +149,7 @@ export function safeWrite(target, contents, root) {
   const check = checkWritable(target, root);
   if (!check.ok) return check;
   try {
-    fs.mkdirSync(path.dirname(check.path), { recursive: true });
+    mkdirpSafe(path.dirname(check.path));
 
     // **O_NOFOLLOW closes the window the check cannot.**
     //

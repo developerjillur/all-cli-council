@@ -51,7 +51,7 @@ import { fileURLToPath } from 'node:url';
 import { buildContext, loadBrief, VERIFIED_OBEDIENT_TOKENS } from './context.mjs';
 import { judgeOutput } from './judge-output.mjs';
 import { createEmitter, redactLine, SCHEMA } from './events.mjs';
-import { checkWritable, safeWrite } from './safe-write.mjs';
+import { checkWritable, safeWrite, mkdirpSafe } from './safe-write.mjs';
 import { createRenderer } from './render.mjs';
 import { prepare, deliveryOf, canary, argvCeiling } from './prompt-delivery.mjs';
 import { borda, verbosityR, familyMix, reasoningOverlap, parseConfidence, parseRubric,
@@ -259,7 +259,10 @@ if (!path.isAbsolute(scratch)) {
   process.exit(2);
 }
 try {
-  fs.mkdirSync(scratch, { recursive: true });
+  // mkdirpSafe, never recursive mkdirSync: `scratchDir` comes from the ROSTER, so a mistaken or
+  // hostile value like "/proc/x/y" would hang the council here — before pre-flight, before a single
+  // member starts. See safe-write.mjs for the measurement.
+  mkdirpSafe(scratch);
 } catch (e) {
   console.error(`\n  Could not create the scratch directory ${scratch}: ${e.message}\n`);
   process.exit(2);

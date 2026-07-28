@@ -20,10 +20,9 @@ node "$CLAUDE_PLUGIN_ROOT/scripts/council.mjs" "Grade this" --context <f>... --r
 node "$CLAUDE_PLUGIN_ROOT/scripts/council.mjs" "x" --preflight                        # who is here; free
 ```
 
-**Pass `--events`.** It writes `.council/runs/<slug>.events.ndjson`, one NDJSON line per event, and
-`node "$CLAUDE_PLUGIN_ROOT/scripts/watch.mjs"` follows it from any other terminal or process. On a
-10–30 minute run that is the difference between "four models are thinking" and "this has hung" —
-tell the user that command so they can watch instead of waiting blind.
+**`--detach` implies `--events`**, so the stream is always there to attach to. A human who wants to
+watch it directly can run `node "$CLAUDE_PLUGIN_ROOT/scripts/watch.mjs"` in another terminal — tell
+them that command rather than leaving them staring at a blank prompt.
 
 **A member's own output cannot be relayed** — measured, every CLI is buffered in plain mode and its
 first byte arrives at 90–98% of the run. The progress is a parent-side clock per member. Do not
@@ -123,6 +122,62 @@ Then three rules, in the order they are usually ignored:
 
 **Stage 3 is yours.** The script stops after the peer review deliberately: a chairman running
 as a subprocess has the answers and not the reason the question was asked.
+
+## Never block on a council. Detach it, then be told.
+
+A run is 10–30 minutes. **Do not start one and wait**, and do not wrap it in a long timeout — if this
+session is killed, restarted, or times out during those minutes, the members have already been spent
+and there is nothing to show. That is the expensive failure, and it is entirely avoidable.
+
+```bash
+# 1. Launch. Returns in milliseconds with a pid and paths, on stdout as JSON.
+node "$CLAUDE_PLUGIN_ROOT/scripts/council.mjs" "<question>" --context <file>... --detach
+
+# 2. Be notified as it happens — one line per real event, plus a heartbeat.
+#    Point your host's background-event mechanism at this. In Claude Code that is Monitor.
+node "$CLAUDE_PLUGIN_ROOT/scripts/feed.mjs" --every=30
+
+# 3. Or just ask, any time, from any session. Cheap, exits immediately.
+node "$CLAUDE_PLUGIN_ROOT/scripts/status.mjs"
+```
+
+**`--detach` puts the council in its own process group with no parent** (`PPID` becomes 1) and its
+stdio pointed at a log file rather than an inherited pipe. Killing this session cannot reach it.
+
+**Then keep working.** The whole point is that you are free while it runs. Do not poll in a loop and
+do not sleep — the feed interrupts you when something happens.
+
+### Reading `status.mjs` — the exit code is the answer
+
+| Exit | Meaning | What to do |
+|---|---|---|
+| **0** | finished and usable | read the run file and synthesise |
+| **1** | failed | report why; nobody answered |
+| **2** | no run found | nothing was started |
+| **3** | **still running** | nothing. Ask again later; the pid is alive |
+| **4** | **died without finishing** | the run is LOST. Say so — the members were spent and there is no synthesis |
+
+**Exit 3 and exit 4 are the pair that matters.** A stream that stopped growing is either a council
+thinking hard — normal for minutes at a time — or a process that died and will never write again. They
+are indistinguishable from the file alone, so the pid is recorded in the stream and checked against the
+kernel. Never report "it is still working" without having checked, and never conclude "it hung" from
+silence alone.
+
+### A run from a previous session is still yours
+
+`status.mjs` finds the newest run in `.council/runs/` on its own. If a session ended mid-council, the
+next one picks it up — exit 3 means keep waiting, exit 0 means the answer has been sitting there
+waiting for you. Nothing needs to be re-run.
+
+### What the feed will and will not tell you
+
+Stage boundaries, each member finishing, the score, and the end. **Not** `member_tick` — that fires
+every second, and a thousand notifications is the same as none. Attaching to a run already in progress
+folds the whole backlog into one catch-up line.
+
+And it reports **death as an event**: if the process disappears without a terminal event, that is a line
+and a non-zero exit, never a quiet stop. A feed that only reports good news cannot be trusted, because a
+crashed run and a thinking run produce exactly the same silence.
 
 ## Two things that will surprise you if nobody says them
 

@@ -168,7 +168,7 @@ if (spaceForm >= 0) {
 // reinterprets it.
 const KNOWN_FLAGS = new Set(['context', 'card', 'stage1-only', 'revise', 'members', 'lenses', 'rubric',
   'peer-review', 'events', 'json-events', 'no-live', 'timeout', 'preflight', 'verify-delivery',
-  'allow-uncontained', 'local-roster']);
+  'allow-uncontained', 'local-roster', 'detach']);
 const unknownFlag = argv.find((a) => a.startsWith('--')
   && !KNOWN_FLAGS.has(a.replace(/^--/, '').split('=')[0]));
 if (unknownFlag) {
@@ -298,6 +298,66 @@ try {
   const prior = JSON.parse(fs.readFileSync(path.join(OUT_DIR, `${slug}.json`), 'utf8'));
   if (prior.question && prior.question !== question) slug = `${slug}-${qhash}`;
 } catch { /* no prior run under this name, or unreadable — either way keep the clean slug */ }
+
+// ── --detach: the run must outlive the session that started it ────────────────
+//
+// **The problem this solves is not cosmetic.** A council is 10–30 minutes. An agent that starts one
+// and then blocks is unusable — it cannot do anything else, and if its session is killed, restarted,
+// or times out during those minutes, the whole run is lost. Not "lost and resumable": the members
+// were already paid for, and there is nothing to show.
+//
+// `--detach` re-executes this script in its own session (`setsid`-equivalent via `detached: true`),
+// with stdio pointed at files rather than inherited pipes, then prints the paths and exits 0
+// immediately. The council keeps running with no terminal attached and no parent.
+//
+// Three properties make it actually safe rather than just backgrounded:
+//
+//   1. **`detached: true` + `unref()`** — a new process group with no parent link, so the child is
+//      not in the harness's group and does not receive its SIGTERM or SIGHUP.
+//   2. **stdio to FILES, never pipes.** An inherited pipe whose reader goes away turns the next
+//      write into EPIPE and kills the child. This is the failure that makes naive `&` unreliable.
+//   3. **The event stream is forced on.** Detaching without it would be launching a process nobody
+//      can observe, which is worse than blocking.
+//
+// What the caller gets back is enough to attach later from ANY session: the events path, the log
+// path, and the pid. `scripts/status.mjs` turns those into an answer.
+if (has('detach')) {
+  const child = argv.filter((a) => a !== '--detach');
+  if (!child.some((a) => a === '--events' || a.startsWith('--events='))) child.push('--events');
+  // No live block in a process with no terminal.
+  if (!child.includes('--no-live')) child.push('--no-live');
+
+  const logPath = path.join(OUT_DIR, `${slug}.log`);
+  const w = checkWritable(logPath, ROOT);
+  if (!w.ok) {
+    console.error(`\n  Cannot detach: ${w.reason}\n`);
+    process.exit(1);
+  }
+  mkdirpSafe(path.dirname(logPath));
+  const logFd = fs.openSync(logPath, 'w');
+
+  const kid = spawn(process.execPath, [fileURLToPath(import.meta.url), ...child], {
+    cwd: ROOT,
+    detached: true,
+    stdio: ['ignore', logFd, logFd],
+    env: process.env,
+  });
+  kid.unref();
+  fs.closeSync(logFd);
+
+  const evPath = flag('events') || path.join(OUT_DIR, `${slug}.events.ndjson`);
+  process.stderr.write(`\n▸ Detached. The council is running with no parent — this session can die `
+    + `without losing it.\n\n`);
+  process.stderr.write(`    pid     ${kid.pid}\n`);
+  process.stderr.write(`    events  ${path.relative(ROOT, evPath)}\n`);
+  process.stderr.write(`    log     ${path.relative(ROOT, logPath)}\n\n`);
+  process.stderr.write(`  Watch it:   node ${path.relative(ROOT, path.join(HERE, 'watch.mjs'))} ${path.relative(ROOT, evPath)}\n`);
+  process.stderr.write(`  Ask once:   node ${path.relative(ROOT, path.join(HERE, 'status.mjs'))}\n`);
+  process.stderr.write(`  Live feed:  node ${path.relative(ROOT, path.join(HERE, 'feed.mjs'))}\n\n`);
+  // stdout stays machine-readable: one JSON object, so a caller does not have to parse prose.
+  console.log(JSON.stringify({ detached: true, pid: kid.pid, events: evPath, log: logPath, slug }));
+  process.exit(0);
+}
 
 // ── the event stream, and the live view fed from it ──────────────────────────
 //
@@ -448,6 +508,11 @@ const absent = requested.filter((m) => !m.resolved);
 ev('run_start', {
   schema: SCHEMA,
   question,
+  // The PID is in the stream so a consumer can tell "still thinking" from "died without finishing".
+  // Without it, a stream that stops mid-run is indistinguishable from one that is merely quiet — and
+  // "quiet" is the normal state of this tool for minutes at a time.
+  pid: process.pid,
+  detached: has('detach'),
   members: requested.map((m) => ({ id: m.id, label: m.label, family: m.family ?? 'unknown' })),
   flags: { lenses: useLenses, rubric: rubricMode, revise: has('revise'), stage1Only, timeoutMin, allowUncontained },
   excludedUncontained: allowUncontained ? [] : uncontained.map((m) => m.id),

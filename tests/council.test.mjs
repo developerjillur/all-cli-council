@@ -1769,6 +1769,144 @@ console.log('\n▸ Round six — 7.3/10, and one line closed a silent-corruption
     /reviews parsed/.test(councilSrc));
 }
 
+// ── running a 10–30 minute council from a session that might not survive it ───
+console.log('\n▸ Detach, status, feed — the three things a supervising agent needs');
+{
+  const cli = path.join(ROOT, 'scripts', 'council.mjs');
+  const statusCli = path.join(ROOT, 'scripts', 'status.mjs');
+  const feedCli = path.join(ROOT, 'scripts', 'feed.mjs');
+
+  // ── status.mjs: the exit code IS the answer ──
+  //
+  // The state that matters is the third one. A stream that stopped growing is either a council
+  // thinking hard — normal for minutes at a time — or a process that died and will never write
+  // again. From the file alone those are IDENTICAL, and confusing them means either killing a
+  // working run or waiting forever on a dead one. So `run_start` carries the pid.
+  {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'council-status-'));
+    const runs = path.join(dir, '.council', 'runs');
+    fs.mkdirSync(runs, { recursive: true });
+    const write = (name, events) => {
+      const f = path.join(runs, `${name}.events.ndjson`);
+      fs.writeFileSync(f, events.map((e) => JSON.stringify(e)).join('\n') + '\n');
+      return f;
+    };
+    const ask = (f) => spawnSync('node', [statusCli, f, '--json'], { encoding: 'utf8', timeout: 20_000, cwd: dir });
+
+    const finished = write('done', [
+      { t: 0, ev: 'run_start', schema: SCHEMA, question: 'q', pid: process.pid, members: [{ id: 'a', label: 'A' }] },
+      { t: 1, ev: 'member_done', stage: '1', id: 'a', label: 'A', ok: true, ms: 1000, chars: 50 },
+      { t: 2, ev: 'run_done', ok: true, answered: 1, requested: 1, file: 'r.md', exitCode: 0, score: 7.5 },
+    ]);
+    let r = ask(finished);
+    check('a finished run exits 0', r.status === 0, `exit ${r.status}`);
+    check('...and reports the score', /"score": 7.5/.test(r.stdout ?? ''));
+
+    // A LIVE pid with no terminal event = still running. Using our own pid guarantees it is alive.
+    const live = write('live', [
+      { t: 0, ev: 'run_start', schema: SCHEMA, question: 'q', pid: process.pid, members: [{ id: 'a', label: 'A' }] },
+      { t: 1, ev: 'stage_start', stage: '1', members: ['a'] },
+      { t: 2, ev: 'member_start', stage: '1', id: 'a', label: 'A', via: 'stdin', promptChars: 10 },
+    ]);
+    r = ask(live);
+    check('a run whose pid is ALIVE exits 3 — still running', r.status === 3, `exit ${r.status}`);
+    check('...and is not mistaken for finished', /"state": "running"/.test(r.stdout ?? ''));
+
+    // A DEAD pid with no terminal event = the run is lost. pid 2^22 cannot exist on any real system.
+    const dead = write('dead', [
+      { t: 0, ev: 'run_start', schema: SCHEMA, question: 'q', pid: 4194303, members: [{ id: 'a', label: 'A' }] },
+      { t: 1, ev: 'stage_start', stage: '1', members: ['a'] },
+    ]);
+    r = ask(dead);
+    check('a run whose pid is GONE exits 4 — died without finishing', r.status === 4, `exit ${r.status}`);
+    check('...and says the run is lost', /"state": "died"/.test(r.stdout ?? ''));
+
+    const failed = write('failed', [
+      { t: 0, ev: 'run_start', schema: SCHEMA, question: 'q', pid: process.pid, members: [] },
+      { t: 1, ev: 'run_error', message: 'interrupted by SIGINT' },
+    ]);
+    check('a failed run exits 1', ask(failed).status === 1);
+
+    const none = spawnSync('node', [statusCli, '--json'], { encoding: 'utf8', timeout: 20_000, cwd: os.tmpdir() });
+    check('no run at all exits 2, rather than hanging or crashing', none.status === 2, `exit ${none.status}`);
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+
+  // ── feed.mjs: one line per notification, and silence must never look like success ──
+  {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'council-feed-'));
+    const f = path.join(dir, 'r.events.ndjson');
+
+    // A run that already ended: the feed must fold the backlog into ONE line and exit, not replay it.
+    fs.writeFileSync(f, [
+      { t: 0, ev: 'run_start', schema: SCHEMA, question: 'q', pid: process.pid, members: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }] },
+      { t: 1, ev: 'stage_start', stage: '1', members: ['a', 'b'] },
+      { t: 2, ev: 'member_tick', stage: '1', id: 'a', elapsedMs: 1000, bytes: 0, lastLine: '' },
+      { t: 3, ev: 'member_tick', stage: '1', id: 'a', elapsedMs: 2000, bytes: 0, lastLine: '' },
+      { t: 4, ev: 'member_done', stage: '1', id: 'a', label: 'A', ok: true, ms: 3000, chars: 90 },
+      { t: 5, ev: 'member_done', stage: '1', id: 'b', label: 'B', ok: false, ms: 900, reason: 'quota' },
+      { t: 6, ev: 'run_done', ok: true, answered: 1, requested: 2, file: 'r.md', exitCode: 0, score: null },
+    ].map((e) => JSON.stringify(e)).join('\n') + '\n');
+
+    const r = spawnSync('node', [feedCli, f, '--every=1'], { encoding: 'utf8', timeout: 30_000 });
+    const lines = (r.stdout ?? '').trim().split('\n').filter(Boolean);
+    check('a finished run is followed and exits 0', r.status === 0, `exit ${r.status}`);
+    check('...the backlog becomes ONE catch-up line, not one per event',
+      lines.filter((l) => /attached to a run already in progress/.test(l)).length === 1,
+      `${lines.length} line(s) total for 7 events`);
+    check('...member_tick never becomes a notification', !lines.some((l) => /tick/.test(l)),
+      'it fires every second — a thousand notifications is the same as none');
+    check('...and the outcome is reported', lines.some((l) => /finished/.test(l)));
+
+    // The important one: a DEAD pid must produce a LINE and a non-zero exit, never silence.
+    const orphan = path.join(dir, 'orphan.events.ndjson');
+    fs.writeFileSync(orphan, [
+      { t: 0, ev: 'run_start', schema: SCHEMA, question: 'q', pid: 4194303, members: [{ id: 'a', label: 'A' }] },
+      { t: 1, ev: 'stage_start', stage: '1', members: ['a'] },
+    ].map((e) => JSON.stringify(e)).join('\n') + '\n');
+    const dead = spawnSync('node', [feedCli, orphan, '--every=1'], { encoding: 'utf8', timeout: 30_000 });
+    check('a run that died is ANNOUNCED, not silently dropped', dead.status === 4, `exit ${dead.status}`);
+    check('...with a line saying the run is lost', /is LOST/.test(dead.stdout ?? ''),
+      'a feed that only reports good news cannot be trusted, because silence looks the same');
+
+    const nothing = spawnSync('node', [feedCli], { encoding: 'utf8', timeout: 20_000, cwd: os.tmpdir() });
+    check('nothing to follow exits 2 with a line', nothing.status === 2 && /no council run/.test(nothing.stdout ?? ''));
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+
+  // ── --detach: return immediately, and outlive the caller ──
+  //
+  // The point is not backgrounding. It is that a 10–30 minute run must not be lost when the session
+  // that started it is killed, restarted, or times out — the members are already spent by then.
+  {
+    const src = fs.readFileSync(cli, 'utf8');
+    check('--detach spawns with detached:true so the child leaves the caller\'s process group',
+      /detached: true,\n\s*stdio: \['ignore', logFd, logFd\]/.test(src),
+      'otherwise the harness\'s SIGTERM reaches it');
+    check('...with stdio to FILES, never inherited pipes', /stdio: \['ignore', logFd, logFd\]/.test(src),
+      'an inherited pipe whose reader goes away turns the next write into EPIPE and kills the child');
+    check('...and unref\'d, so the parent can exit', /kid\.unref\(\)/.test(src));
+    check('...and it forces the event stream on', /if \(!child\.some\(\(a\) => a === '--events'/.test(src),
+      'detaching without it would launch a process nobody can observe');
+    check('...and prints machine-readable paths on stdout',
+      /JSON\.stringify\(\{ detached: true, pid: kid\.pid/.test(src));
+    check('the pid is recorded in the stream, so liveness is knowable', /pid: process\.pid,/.test(src));
+
+    // A real detached launch, with a member that does not exist so nothing is spent.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'council-detach-'));
+    const r = spawnSync('node', [cli, 'a detached question', '--members=nonexistent-xyz', '--detach'],
+      { encoding: 'utf8', timeout: 30_000, cwd: dir });
+    check('--detach returns immediately instead of blocking', r.status === 0, `exit ${r.status}`);
+    let payload = {};
+    try { payload = JSON.parse((r.stdout ?? '').trim().split('\n').pop()); } catch { /* nothing printed */ }
+    check('...and hands back a pid, an events path and a log path',
+      Boolean(payload.pid && payload.events && payload.log), JSON.stringify(payload).slice(0, 80));
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 // ── the CLI actually runs, end to end, with the flags it documents ───────────
 console.log('\n▸ Integration — the suite must run the CLI, not only import its parts');
 {

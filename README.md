@@ -7,7 +7,7 @@
 [![node](https://img.shields.io/badge/node-%3E%3D22-brightgreen)](https://nodejs.org)
 [![dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)](#quick-start)
 [![API keys](https://img.shields.io/badge/API%20keys-none-brightgreen)](#the-members)
-[![tests](https://img.shields.io/badge/tests-385-blue)](tests/council.test.mjs)
+[![tests](https://img.shields.io/badge/tests-410-blue)](tests/council.test.mjs)
 
 **Four models. Three vendors. They rank each other blind. You decide.**
 
@@ -136,10 +136,12 @@ all-cli-council/
 │   ├── events.mjs               the NDJSON event stream + its reducer
 │   ├── render.mjs               the live view, TTY and non-TTY
 │   ├── watch.mjs                a second, independent consumer of the stream
+│   ├── status.mjs               "is it done, and if not is it alive?" — exit code is the answer
+│   ├── feed.mjs                 one line per event, for a supervising agent to be notified by
 │   ├── verify-containment.mjs   proves each member cannot write
 │   ├── judge-output.mjs         is this an answer, or a CLI saying it cannot answer
 │   └── members.json             the roster. Override with .council/members.json
-├── tests/council.test.mjs       385 cases, spends nothing
+├── tests/council.test.mjs       410 cases, spends nothing
 └── .claude-plugin/              plugin + marketplace manifests
 ```
 
@@ -169,7 +171,7 @@ which is what "installed as a plugin" actually means:
 ✅  a real run writes into the USER project                .council/runs/{md,json,ndjson}
 ✅  the plugin directory is untouched                      git status: 0 changed files
 ✅  the environment allowlist holds                        7 passed to members, 50 withheld
-✅  385/385 tests pass from the fresh clone                and with no `npm install`
+✅  410/410 tests pass from the fresh clone                and with no `npm install`
 ```
 
 **4/4, not 5/5** — `grok` is excluded by default because it cannot be prevented from writing. The
@@ -454,6 +456,73 @@ quietly contains the pack is the leak `context.mjs` exists to prevent, one layer
 `--json-events` sends the same stream to **fd 3** instead, for a parent process that wants it without
 a file: stderr belongs to the human, stdout carries the run-file path.
 
+### 🔌 Detached, so a 10–30 minute run cannot be lost with its session
+
+The problem is not that a council is slow. It is that **an agent that starts one and waits is unusable,
+and if its session dies during those minutes the members have already been spent for nothing.** Not
+"lost and resumable" — lost.
+
+```bash
+node scripts/council.mjs "<question>" --context src/x.js --detach
+```
+
+Returns in milliseconds, with machine-readable paths on stdout:
+
+```json
+{"detached":true,"pid":67720,"events":".council/runs/<slug>.events.ndjson","log":".council/runs/<slug>.log"}
+```
+
+Three things make that safe rather than merely backgrounded, and all three are load-bearing:
+
+| | |
+|---|---|
+| **its own process group, no parent** | measured: `PPID` becomes 1 and the `PGID` differs from the launching shell's, so a signal sent to that session cannot reach it |
+| **stdio to files, never pipes** | an inherited pipe whose reader goes away turns the child's next write into `EPIPE` and kills it. This is why a bare `&` is unreliable |
+| **`--events` forced on** | detaching without it would launch a process nobody can observe, which is worse than blocking |
+
+Then **be told, rather than watching**:
+
+```bash
+node scripts/feed.mjs --every=30      # one line per real event, plus a heartbeat
+node scripts/status.mjs               # ask once, any time, from any session
+```
+
+`feed.mjs` emits one line per notification — stage boundaries, each member finishing, the score, the
+end. **Not** `member_tick`, which fires every second: a thousand notifications is the same as none.
+Attaching to a run already in progress folds the entire backlog into a single catch-up line.
+
+```
+▸ attached to a run already in progress (22 events): stage 1 · 0 answered
+⏳ 30s elapsed · stage 1 · 0 answered · still thinking: Fable 5 (38s), Sonnet 5 (38s)
+✅ Sonnet 5 answered in 42s
+✅ Fable 5 answered in 53s
+🏁 finished — 2/2 answered · .council/runs/<slug>.md
+```
+
+#### The exit code of `status.mjs` is the answer
+
+| Exit | State | |
+|---|---|---|
+| 0 | finished, usable | read the run file |
+| 1 | failed | nobody answered |
+| 2 | no run found | nothing was started |
+| **3** | **still running** | the pid is alive — wait |
+| **4** | **died without finishing** | the run is lost, and it says so |
+
+**3 and 4 are the pair that justifies the whole design.** A stream that has stopped growing is either a
+council thinking hard — the normal condition of this tool for minutes at a time — or a process that died
+and will never write again. Those are **identical from the file alone**, and confusing them means either
+killing a working run or waiting forever on a dead one. So `run_start` carries the pid and this asks the
+kernel instead of guessing.
+
+The same property makes a run survive the session that started it: `status.mjs` finds the newest run by
+itself, so a *new* session picks up an in-flight council with no arguments. Exit 3, keep waiting. Exit 0,
+the answer has been sitting there.
+
+**A feed that only reports good news cannot be trusted**, because a crashed run and a thinking run
+produce exactly the same silence. So death is an event: the process disappearing without a terminal
+event is a line and a non-zero exit, never a quiet stop.
+
 ### 🔬 Cross-vendor is one axis of diversity. `--lenses` adds a second
 
 The strongest objection to this council is in its own README: models on overlapping training
@@ -730,6 +799,7 @@ Five rules, written into every run file:
 | `--preflight` | who is available, and how each one receives its prompt. Costs nothing |
 | `--lenses` | give each member a different reasoning method. Opt-in, unmeasured |
 | `--rubric` | grade the context out of 10 across six dimensions, median-aggregated |
+| `--detach` | run it in its own process group with no parent, print the pid and paths, and exit. **Use this** rather than blocking for 10–30 minutes |
 | `--events[=path]` | write an NDJSON progress stream. `scripts/watch.mjs` follows it from anywhere |
 | `--json-events` | the same stream on fd 3, for a parent process |
 | `--no-live` | plain append-only output instead of the in-place block. Implied when not a TTY |
@@ -841,7 +911,7 @@ Listed because a tool that hides these is worth less than one without them.
 ## Tests
 
 ```bash
-node tests/council.test.mjs     # 385 cases, spends nothing
+node tests/council.test.mjs     # 410 cases, spends nothing
 ```
 
 **Every case was demonstrated OPEN before it was closed** — absolute-path traversal, symlink

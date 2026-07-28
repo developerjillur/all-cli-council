@@ -80,6 +80,9 @@ export function argvCeiling(platform = process.platform) {
  * `file`  — write the prompt to a 0600 file in the scratch dir and substitute `{promptFile}`.
  * `argv`  — substitute `{prompt}`. Size-checked, and the caller is told it is exposed.
  */
+/** The only three channels there are. Anything else is a typo, and a typo must not pick a default. */
+export const DELIVERY_MODES = new Set(['stdin', 'file', 'argv']);
+
 export function deliveryOf(member) {
   if (member.promptVia) return member.promptVia;
   if (member.args.some((a) => a.includes('{promptFile}'))) return 'file';
@@ -98,20 +101,37 @@ export function deliveryOf(member) {
 export function prepare(member, prompt, scratch, platform = process.platform, subs = {}) {
   const via = deliveryOf(member);
 
+  // A closed set, checked first. `promptVia: "sdtin"` used to fall past the stdin branch and land in
+  // argv handling — which, for a member whose args contain no `{prompt}`, meant spawning the CLI with
+  // no prompt at all. A typo in a roster should not silently choose a delivery mechanism.
+  if (!DELIVERY_MODES.has(via)) {
+    return { ok: false, via, reason: `member "${member.id}" declares promptVia:"${via}", which is not a `
+      + `delivery mode. Valid: ${[...DELIVERY_MODES].join(', ')}. Refused rather than guessed at.` };
+  }
+
   // **Every placeholder EXCEPT the prompt is substituted first, on the raw args.**
   //
   // `{timeoutMin}` used to be mapped over `plan.args` by the caller, after the prompt was already in
   // there — so for an argv-delivered member it rewrote any occurrence inside the context pack. A
   // member reviewing this very file would have been shown a doctored copy of it. Ordering is the
   // whole fix: substitute the small values while the args are still small, and let the prompt in last.
+  // `replaceAll`, not `replace`. With a string pattern `replace` substitutes only the FIRST
+  // occurrence, so an argument legitimately mentioning a placeholder twice — `--t {timeoutMin}m
+  // --hard-timeout {timeoutMin}m` — kept the second one literal.
   const args = member.args.map((a) => Object.entries(subs)
-    .reduce((acc, [k, v]) => acc.replace(`{${k}}`, () => String(v)), a));
+    .reduce((acc, [k, v]) => acc.replaceAll(`{${k}}`, () => String(v)), a));
 
   if (via === 'stdin') {
     // A placeholder left in the args of a stdin member would send the prompt through both
     // channels — argv exposure restored by accident, and some CLIs would see it twice.
-    if (args.some((a) => a.includes('{prompt}'))) {
-      return { ok: false, via, reason: `member "${member.id}" declares promptVia:"stdin" but still has a {prompt} placeholder — the prompt would travel twice, once of them exposed` };
+    // EITHER placeholder. `{promptFile}` was not checked, so a stdin member carrying one spawned with
+    // the literal string "{promptFile}" as an argument — a CLI given a path that does not exist, whose
+    // error then arrives as a member failure with no hint of the cause.
+    const stray = args.find((a) => a.includes('{prompt}') || a.includes('{promptFile}'));
+    if (stray) {
+      return { ok: false, via, reason: `member "${member.id}" declares promptVia:"stdin" but an argument `
+        + `still contains a placeholder (${stray}). Either the prompt would travel twice — once of them `
+        + `exposed in argv — or the literal placeholder would be passed as a path.` };
     }
     return { ok: true, via, args, stdin: prompt, exposed: false, cleanup: () => {} };
   }
@@ -150,7 +170,7 @@ export function prepare(member, prompt, scratch, platform = process.platform, su
       promptFile: f,
       // A replacer function, never a replacement string: `String.replace` expands `$&`, `` $` ``,
       // `$'` and `$1` in a string replacement, and these prompts are full of source code.
-      args: args.map((a) => a.replace('{promptFile}', () => f)),
+      args: args.map((a) => a.replaceAll('{promptFile}', () => f)),
       // Removed as soon as the member exits, whether it answered or not. A scratch dir that
       // accumulates prompt files is a slow-motion version of the leak this replaced.
       cleanup: () => { try { fs.rmSync(f, { force: true }); } catch { /* gone */ } },
@@ -181,7 +201,7 @@ export function prepare(member, prompt, scratch, platform = process.platform, su
     // Measured: a prompt containing `s.replace(/x/, '$&$&')` arrived as
     // `s.replace(/x/, '{prompt}{prompt}')`, and `$'` / `` $` `` were deleted. A replacer
     // function is never pattern-expanded.
-    args: args.map((a) => a.replace('{prompt}', () => prompt)),
+    args: args.map((a) => a.replaceAll('{prompt}', () => prompt)),
     cleanup: () => {},
   };
 }

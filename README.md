@@ -7,7 +7,7 @@
 [![node](https://img.shields.io/badge/node-%3E%3D22-brightgreen)](https://nodejs.org)
 [![dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)](#quick-start)
 [![API keys](https://img.shields.io/badge/API%20keys-none-brightgreen)](#the-members)
-[![tests](https://img.shields.io/badge/tests-295-blue)](tests/council.test.mjs)
+[![tests](https://img.shields.io/badge/tests-384-blue)](tests/council.test.mjs)
 
 **Four models. Three vendors. They rank each other blind. You decide.**
 
@@ -139,7 +139,7 @@ all-cli-council/
 │   ├── verify-containment.mjs   proves each member cannot write
 │   ├── judge-output.mjs         is this an answer, or a CLI saying it cannot answer
 │   └── members.json             the roster. Override with .council/members.json
-├── tests/council.test.mjs       295 cases, spends nothing
+├── tests/council.test.mjs       384 cases, spends nothing
 └── .claude-plugin/              plugin + marketplace manifests
 ```
 
@@ -165,7 +165,7 @@ Verified from a clean clone installed as a plugin:
 ✅  --preflight resolves through $CLAUDE_PLUGIN_ROOT      5/5 members
 ✅  a real run writes into the USER project              .council/runs/
 ✅  nothing leaks into the plugin directory
-✅  295/295 tests pass from the installed copy
+✅  384/384 tests pass from the installed copy
 ```
 
 Cloned standalone instead? Use the path you cloned to in place of `$CLAUDE_PLUGIN_ROOT`.
@@ -521,254 +521,105 @@ to itself, which is the one a generic reviewer never applies.
 
 ---
 
-## It graded itself, and scored 5.0/10
+## It graded itself, five times, and acted on every finding
 
-`--rubric` was built for other people's code. Pointing it at `scripts/` was the obvious first test,
-and the result is the most useful thing in this repo's history.
+`--rubric` was built to grade other people's code. Pointing it at `scripts/` was the obvious first
+test, and it is now the most useful thing in this repo's history.
 
-**Four judges, three answered, median 5.0/10 — range 4–5, weakest dimension `correctness` at 4.0.**
+| Round | Score | Range | Weakest | Tests after |
+|---|---|---|---|---|
+| 1 | **5.0** | 4–5 | correctness 4.0 | 204 |
+| 2 | **6.5** | 5–7 | security 5.0 | 249 |
+| 3 | **7.0** | 5–8.2 | correctness 6.0 | 295 |
+| 4 | **7.0** | 5.5–7.8 | correctness 6.5 | 326 |
+| 5 | **7.3** | 6.5–8 | correctness 7.0 | 363 |
+| 6 | **7.3** | 6–7.7 | correctness 7.0 | 384 |
 
-It also found a bug **by failing**: Gemini died one millisecond in with *"The argument `args[1]` must
-be a string without null bytes."* `events.mjs` carried a literal NUL inside a regex character class
-written as raw bytes. One byte in one comment unspawned a whole member, after the other three had
-already started spending. Two fixes: the class is built with `String.fromCharCode`, and a
-`--context` file containing a NUL is now **refused with a reason** rather than passed on.
+**Roughly a hundred defects, every one reproduced before it was fixed and every one now a test.** The
+full accounting is in the commit messages — `git log` reads as the honest version of this section. What
+follows is what was worth learning, rather than a list.
 
-The rest, each reproduced before it was fixed and each now carrying a test:
+### The tests were green while the central promise was false
 
-### The per-reviewer shuffle was barely shuffling
+*"Members advise, they never edit"* was enforced by a regex over each member's flags:
+`/read-only|plan|--print|-p$/`. It passed. **Three of five members could write files** — `--print` is
+an output format and a bare `-p` is a prompt flag, and a pattern over flag strings cannot tell a
+permission from a coincidence. `claude` wrote `PROOF.txt` into its cwd; `grok` wrote to an arbitrary
+absolute path and **no flag it offers stops it**, so it is excluded by default and the package claims
+four members across three vendors rather than five across four.
 
-The headline claim — *"this is not parity with the original, it is better than it"* — rested on a
-generator that overflowed. The seed was 48-bit and the LCG step ran in floating point, so
-2⁴⁸ × 1103515245 ≈ 2⁷⁸ rounded away the low bits, which are the only ones `% (i + 1)` reads.
+Containment is now a measurement ([`verify-containment.mjs`](scripts/verify-containment.mjs)), not a
+sentence.
 
-| | before | after |
-|---|---|---|
-| `h % 4` over 20k draws | `[19922, 78, 0, 0]` | uniform |
-| distinct permutations of 5 | **23 of 120** | **120 of 120** |
-| distinct permutations of 4 | 5 of 24 | 24 of 24 |
+### The fixes had the same bugs as the code
 
-Reviewers were seeing a handful of near-identical orderings, which is the shared invisible tilt the
-feature exists to remove.
+This is the part worth taking seriously. In round two, three of four judges independently found that
+the symlink guard added in round one covered two of three output files. In round three, two findings
+were round two's fixes: `{timeoutMin}` substitution was **rewriting the source under review**, and
+`--json-events` still failed silently while a comment claimed otherwise. In round five, `rankedLabels`
+had been wrong in *both* directions across two rounds — first dropping whole reviews, then letting
+prose vote.
 
-### `--verify-delivery` failed every member that complied exactly
+A council is unusually good at this, because it reads the fix and the claim about the fix side by side.
 
-The canary asked for the bare token. The token is 16 characters; `judge-output.mjs` rejects anything
-under 24 as *"too short to be an answer"*. **The one feature whose entire job is catching a silent
-false negative was itself a guaranteed false negative.** Verified live after the fix: 4/4 pass.
+### The worst defects were silent, and several were self-inflicted
 
-### A repository could choose what got executed
+The quota guard scanned unanchored body text — and this package **quotes the trigger strings in its own
+comments**, which ship inside every pack it sends. A member reviewing the quota guard was liable to be
+discarded *by* the quota guard, reported as a CLI failure. Similarly, `--verify-delivery` failed every
+member that complied exactly (the canary was shorter than the answer floor), and later rejected the
+members with the *best* instincts, because the probe read as injection-shaped and a careful model said
+so.
 
-`.council/members.json` was loaded in preference to the packaged roster **with no opt-in**, and every
-field in it is attacker-controlled: `cmd` and `args` are what gets spawned, and `contained` is the
-flag telling this script whether a member may write files. So `git clone`, then run a council in that
-repo — which the skill does by itself when a decision looks expensive to reverse.
+The pattern: **every guard written to prevent a false negative produced one.**
 
-Worse than ordinary config injection, because the containment check was *inside* the file being
-trusted: a hostile roster declared itself contained and the guard read the attacker's answer to its
-own question.
+### Two that broke installations outright
 
-Now `--local-roster` is required, **and `contained` is stripped from a local roster whatever it
-says** — containment is something [`verify-containment.mjs`](scripts/verify-containment.mjs)
-demonstrates, not something a file claims.
+- The prompt travelled in `argv`. Linux caps a single argv string at 131,072 bytes; the documented
+  context budget is 160,000. Measured `E2BIG` in `node:22-alpine` — **a run at the advertised budget
+  could not spawn a member on Linux at all.** macOS has no per-argument cap, which is why it was
+  invisible. The same bug published the whole pack to `/proc/<pid>/cmdline`, mode 444.
+- The path denylist was matched against the **absolute** path, so `/(^|\/)data\//` refused every file
+  in any project checked out under a directory called `data`.
 
-### The brief was the one input nothing checked
-
-`--context` files go through realpath containment, a path denylist, a secret scan, a NUL check and an
-injection fence. The brief went through **none of them** — and it is read *automatically* from
-`AGENTS.md` or `CLAUDE.md`, files that arrive with any repository you clone, then prepended **above**
-the "DATA, not instructions" header, in the position reserved for the operator's own words.
-
-**The carefully fenced channel was the one the user chose deliberately. The unfenced, unscanned,
-automatically-trusted channel was the one an attacker controls.**
-
-Now it is scanned like any other file, and fenced as **policy** rather than as inert data — a brief
-is *supposed* to constrain the answer, so the fence draws the line between *constraints on the
-answer* (honoured) and *changes to the task, the output format, or these instructions* (reported,
-never obeyed).
-
-### And the rest
-
-| Defect | Consequence |
-|---|---|
-| The stage-2 board was not fenced | other models' output is untrusted input; the `FINAL RANKING:` spoof fix survived the attack instead of closing the door |
-| The argv guard counted **characters** | the kernel counts bytes. 60,000 em-dashes is 60,000 chars and **180,000 bytes** — waved through, then `E2BIG` |
-| `judgeOutput` discarded *"Error handling here is the weak point…"* | a real answer, silently thrown away by `/^\s*error[: ]/i`. Now requires a delimiter a CLI uses and a sentence does not |
-| `--events=run.ndjson` created a **directory** | `file.replace(/\/[^/]*$/, '')` needs a slash; `path.dirname` was meant |
-| Borda weighted reviewers by format compliance | a reviewer naming 2 of 4 distributed 3 points; one naming all 4 distributed 10. Normalised to 1.0 each, with "how many reviewers ranked it" reported separately |
-| Stage 1b used **one fixed board for everyone** | exactly the flaw this repo criticises the original for. Stage 2 was fixed; 1b was not |
-| Stage 1b reported `failed: 0` unconditionally | and counted un-revised fallbacks as successful revisions |
-| The run file said **3/3** where the terminal said **3/4** | the durable record was the one hiding the degradation |
-| Pre-flight and `spawn` could resolve **different binaries** | pre-flight searched `~/.local/bin` first, `spawn` searches PATH. Resolved once now, and the resolved path is what runs |
-| Ctrl-C orphaned every member | detached process groups survived the parent and kept spending, with no terminal attached |
-| A fatal error emitted no terminal event | a UI tailing the stream waited forever on a run that had died |
-| A run file could be a symlink | `.council/runs/<slug>.md` is a predictable path inside your repo |
-| Windows silently reported every member missing | PATH split on `:`, no PATHEXT, no POSIX process groups. It now refuses loudly and points at WSL |
-
-### One false claim, removed
-
-`context.mjs` said its ceiling was *"set where all four were still obedient, with headroom."* It is
-not: 160,000 chars is ~40k tokens and the verified-obedient point is 27k. **The 27k–80k range has
-never been probed** — the true boundary is unknown, and the comment now says so instead of implying
-a measurement that does not exist.
-
-**Tests: 54 → 204 this round.** Every case above is one of them.
-
----
-
-## Round two: 6.5/10, and three judges found the same hole
-
-Score went 5.0 → **6.5** (range 5–7). Weakest dimension: `security` at 5.0. What makes this round
-worth reading is the convergence — **three of four judges independently named the same defect**, and
-it was in the previous round's *fix*.
-
-The symlink guard added for the run files covered the `.md` and the `.json`. It did not cover
-`--events`, which is opened at **startup** and written to for the whole run. And where it did run it
-was too shallow: `lstat` on a leaf answers *"is this a symlink"*, not *"does this resolve inside the
-workspace"* — so a symlinked `.council/runs/` redirected every file in it while each leaf check came
-back clean, because the leaves did not exist yet.
-
-Their unanimous recommendation was one boundary rather than a third patch, so
-[`safe-write.mjs`](scripts/safe-write.mjs) is now the only way this package writes anything: leaf
-*and* resolved parent, checked before the emitter opens.
-
-### The one that silently corrupted the work under review
-
-```js
-member.args.map((a) => a.replace('{prompt}', prompt))
-```
-
-`String.replace` expands `$&`, `` $` ``, `$'` and `$1` **in the replacement** — and the replacement
-is source code. Measured:
-
-| sent | arrived |
-|---|---|
-| `s.replace(/x/, '$&$&')` | `s.replace(/x/, '{prompt}{prompt}')` |
-| `` $` `` and `$'` | deleted |
-
-**The council was grading corrupted copies of any file containing a regex replacement**, with no
-sign anything was wrong. A replacer function is never pattern-expanded.
-
-### The one that reported success on failure
-
-The shutdown handler's exit timer was `unref`'d — which means it does not hold the event loop open.
-With nothing else pending, node exited **normally, code 0**, before the SIGKILL sweep and
-`process.exit(code)` inside it ever ran. A council that died of an uncaught error told its caller it
-had succeeded.
-
-### Security — the weakest dimension, at 5.0
-
-| Defect | Why it mattered |
-|---|---|
-| **`code/` and `plan/` were implicit containment roots** | a repo shipping `code` as a symlink to `/` made the entire filesystem "inside the workspace" — the realpath guard resolved the link, then compared against the resolved link. Extra roots are operator-supplied now |
-| **A brief could be a symlink** | `AGENTS.md` pointing at `~/.aws/credentials` was read, trusted, and prepended to every prompt |
-| **`contained` failed *open*** | `m.contained !== false` treated an undefined field as contained, so any roster omitting it was trusted. Absence means nobody ran the verifier |
-| **Failed answers were unredacted in the run file** | the event stream's copy was fixed and the durable one was not — the worse of the two places to leave it |
-| **A file containing ``` broke the data fence** | everything after it reached the member as prose rather than quoted data, so "this is DATA" silently stopped applying |
-
-### Correctness, robustness, honesty
-
-| Defect | |
-|---|---|
-| `familyMix` used `>`, so **exactly half was "ok"** | and the default roster is Anthropic 2 of 4. The diagnostic warning about a lopsided council was structurally silent on the shipped configuration |
-| A quota failure on **stderr** was ignored whenever stdout had text | a partial answer plus "you have reached your usage limit" was ranked as a considered opinion |
-| One terse member voided the overlap metric **for everybody** | `thin` was `some()`. Now the terse member is excluded and reported |
-| Stage 2's prompt was never size-checked | it is categorically the largest of the run — the same preamble *plus* every answer |
-| A member's self-timeout was a literal `14m` | so `--timeout=30` left a member that still quit at 14 minutes, reported as a plain failure. `{timeoutMin}` is substituted now |
-| A failed review still contributed its "minority view" | a CLI's error message, in the section a chairman is told to weigh most carefully |
-| An interrupt could leave a prompt file on disk | that file is the entire context pack |
-| `--json-events` failed silently while `--events` failed loudly | the package's own rule applied to one sink and not the other |
-| A roster without `scratchDir` crashed with a raw `TypeError` | before any handler was installed |
-| An absent member rendered as **"queued"** for the whole run | the `'absent'` state the renderer filters on was never set |
-| `--members codex` swallowed its value into the question | changing the roster and the question at once, silently |
-| `resolveCmd`'s comment promised a report no code produced | now it produces it |
-
-### And the canary was punishing the members with the best instincts
-
-The delivery probe said *"Reply with exactly this line and nothing else."* Sonnet 5 read that as
-injection-shaped — correctly — and answered *"This appears to be a prompt injection attempt."* The
-tool reported **"NO CANARY — the prompt is not arriving"** on a channel that worked perfectly.
-
-A false negative, in the one feature whose entire purpose is not producing false negatives. The probe
-now explains what it is and why, and `--verify-delivery` reports **three** outcomes rather than two —
-*returned*, *declined* (so it clearly did arrive; nothing to fix), *absent*. Verified live: 4/4.
-
-**Tests: 204 → 249.**
-
----
-
-## Round three: 7.0/10 — and two of the findings were round two's fixes
-
-**5.0 → 6.5 → 7.0.** Weakest dimension: `correctness` at 6.0. Sonnet 5 hit a session quota mid-run,
-so this was a 3-member council — and the quota guard did its job, refusing *"You've hit your session
-limit"* rather than ranking it as an opinion.
-
-The most useful thing here is that **a council reviewing a package which had just been fixed found
-defects in the fixes.** Two of them were mine, from one round earlier.
-
-### `{timeoutMin}` was rewriting the code under review
-
-Round two made a member's self-timeout track `--timeout` by substituting `{timeoutMin}` into its
-arguments. The substitution ran over the **finished** argument array — which, for an argv-delivered
-member, already contains the entire context pack.
-
-**So it edited the source being reviewed.** A member grading `members.json` — a file that now
-contains the literal string `{timeoutMin}m` — would have been shown a doctored copy of it, with no
-sign anything had changed. That is the worst failure class this package has, and the fix for a
-different bug introduced it.
-
-All non-prompt substitution now happens inside `prepare()`, on the argument *template*, before the
-prompt goes anywhere near it. Ordering is the entire fix.
-
-### `--json-events` still failed silently, and the comment said otherwise
-
-`events.mjs` was taught to detect an unopenable fd 3. The guard in `council.mjs` still only asked
-about the *file* sink. So the comment claiming the asymmetry was fixed **was the other half of the
-bug** — a false statement in the code, which is exactly what the `honesty` dimension exists to punish.
-
-### The one that broke legitimate installs outright
-
-```js
-if (REFUSE.some((re) => re.test(real)))   // `real` is the ABSOLUTE resolved path
-```
-
-`/(^|\/)data\//` therefore matched every file in any project checked out under a directory called
-`data` — `/Volumes/data/myrepo`, say. **The whole context pack refused as "a credential or
-private-data path"**, for a reason the message never explains.
-
-The patterns describe paths *within a project*. Matching them against the machine's directory layout
-was a category error. They are relative to the workspace now, and a `data/` directory *inside* the
-project is still refused.
-
-### A formatting preference was a disenfranchisement
-
-`rankedLabels` split on newlines and took `.match()[1]` — the **first** label on each line. A reviewer
-that wrote its ranking inline:
+### And the entry point was the last one to be fixed
 
 ```
-FINAL RANKING: 1. Response C 2. Response A 3. Response B
+node council.mjs Should we use --lenses here?
 ```
 
-contributed exactly one label, failed the `parsed.length < 2` check, and was **dropped from the tally
-entirely** — reported in the run file as *"no parseable `FINAL RANKING:` block"*, which was true and
-misleading. `matchAll` over the whole block now.
+The shell splits that. `--lenses` was stripped from the question **and switched on** — a different
+question, in a different mode, reported as success. A quoted question is one argv token, so the guard
+is exact.
 
-### Security and honesty
+<details>
+<summary><b>The rest, in one list</b></summary>
 
-| Defect | |
-|---|---|
-| **A brief symlinked to an in-repo `.env`** | passed containment — the target *is* inside the workspace — and skipped the path denylist entirely. The one file class the pack refuses by name, reachable through the channel that is read automatically |
-| `mkdirSync` ran **outside** the write boundary | so a symlinked `.council` got a directory created at the target before anything was validated. `safeWrite` owns mkdir now |
-| `offPath` was computed and never reported | while a doc comment claimed pre-flight reported it |
-| An answer discussing *"authentication failed"* was classified as one | the same false positive as the `Error` prefix, in the tier that was supposed to be unambiguous. Line-anchored now |
-| A **two-answer tally** printed a structurally constant tie | with self-votes excluded, each reviewer ranks exactly one other, so both score 1.00 whoever it preferred. Reported as degenerate |
-| `--revise` computed *"one argument or five?"* on the revision round | which exists to make members converge. The diagnostic fired on exactly the convergence the flag was chosen to produce. Measured on the independent answers now |
-| The stage-2 argv estimate arrived **after** stage 1 was paid for | the pre-spend warning, after the spend |
-| A bare `--events` before the question was refused | with an error telling the user to write `--events=the question` — advice to do something wrong |
-| Compound tokens defeated the overlap subtraction | an answer writing `queue.js` shared nothing with a pack writing `src/queue.js`, and identifiers are the terms most likely to be written two ways |
-| **The canary's refusal classifier could call a dead channel working** | a member with no prompt replying *"I cannot comply with an empty request"* matched `/cannot comply/` and was reported as *"delivery channel is FINE"* — the original false negative, restored through the classifier written to prevent it |
+**Silent wrong answers:** a repo-supplied roster could choose what got executed; the brief bypassed
+every content check and could be a symlink to `.env`; the stage-2 board was unfenced; a NUL byte in one
+file unspawned a whole member; `--rubric --revise` destroyed the scores and blamed the judges; a
+delivery mode with no placeholder ran the CLI with no prompt; the per-reviewer shuffle reached 23 of
+120 permutations because of float overflow; Borda weighted reviewers by how completely they followed
+the output format; `familyMix` guessed the vendor from the id and defaulted everything unknown to
+Google, then used `>` so exactly half a council read as "ok".
 
-**Tests: 249 → 295.**
+**Reported success on failure:** an unref'd exit timer let node exit 0 before the crash handler ran;
+a failed JSON write was then listed as written; stage 1b hardcoded `failed: 0` and counted fallbacks
+as successes; the run file said "3/3" where the terminal said "3/4".
+
+**Leaks and races:** members inherited `process.env` wholesale, including every API key in the shell;
+`NODE_OPTIONS` could inject code before a member's permission mode existed; failure text was
+unredacted in the durable file; the write boundary was lstat-then-open until `O_NOFOLLOW`; `code/` and
+`plan/` were repo-nameable containment roots.
+
+**Hangs and exhaustion:** Ctrl-C orphaned four detached CLIs still spending; a FIFO passed as context
+blocked forever, before any timeout existed; member output was unbounded and re-scanned from the start
+on every chunk; `--timeout=0.0001` became a 6ms budget.
+
+**Honesty:** the context ceiling claimed to sit inside the verified-obedient zone and does not; a doc
+comment promised a report no code produced; a comment described a fix that was half-applied.
+
+</details>
 
 ---
 
@@ -958,6 +809,15 @@ Listed because a tool that hides these is worth less than one without them.
 - **Containment was verified on macOS with these CLI versions.** A CLI can change its flags in a
   point release, which is exactly why `verify-containment.mjs` ships rather than a claim.
 - **Model IDs age.** `gemini-3.1-pro-high`, `grok-4.5`, `gpt-5.6-sol` are pinned and will drift.
+- **The write boundary closes the leaf race, not the parent race.** `O_NOFOLLOW` applies to the
+  final path component; a parent directory swapped for a symlink between the check and the open is
+  still followed. Closing that needs `openat` at every level, which node does not expose.
+- **Hard links bypass realpath containment.** A hard link has no separate target to resolve, so a
+  link inside the workspace pointing at an inode outside it reads as contained. Unmeasured and
+  unfixed.
+- **The score plateaued at 7.3 across two rounds**, and the judges are still finding real defects —
+  the best of round six was a silent multi-byte corruption nobody had noticed in six rounds. Treat
+  the number as a floor on what is wrong, not a ceiling.
 - **The 27k–80k context range has never been probed.** The ceiling ships at ~40k tokens, above the
   last point where all members were verified obedient. Where it actually breaks is unknown.
 - **`grok` is uncontained and there is no fix for it here.** Its own permission flags are accepted
@@ -971,7 +831,7 @@ Listed because a tool that hides these is worth less than one without them.
 ## Tests
 
 ```bash
-node tests/council.test.mjs     # 295 cases, spends nothing
+node tests/council.test.mjs     # 384 cases, spends nothing
 ```
 
 **Every case was demonstrated OPEN before it was closed** — absolute-path traversal, symlink

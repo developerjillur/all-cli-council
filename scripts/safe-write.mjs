@@ -103,9 +103,16 @@ export function safeWrite(target, contents, root) {
     //
     // `checkWritable` is an lstat, and anything between the lstat and the open is a race: a symlink
     // planted in that gap is followed, and no amount of checking beforehand can see it. O_NOFOLLOW
-    // makes the KERNEL refuse to follow a symlink at the final path component, so the guarantee no
-    // longer depends on winning a race. The lstat stays because it produces a good error message;
-    // this is what actually enforces it.
+    // makes the KERNEL refuse to follow a symlink **at the final path component**, so for the leaf the
+    // guarantee no longer depends on winning a race. The lstat stays because it produces a good error
+    // message; this is what enforces it.
+    //
+    // **What it does NOT cover, stated precisely:** a PARENT directory swapped for a symlink between
+    // the realpath walk and this open is still followed — O_NOFOLLOW applies to the last component
+    // only, and closing the parent case needs `openat` with `O_DIRECTORY|O_NOFOLLOW` at every level,
+    // which node does not expose. The residual window requires write access to a parent directory of
+    // `.council/runs` inside the user's own workspace, and is recorded in the README's limitations
+    // rather than described as closed.
     const flags = fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC
       | (fs.constants.O_NOFOLLOW ?? 0);
     let fd;

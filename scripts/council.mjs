@@ -116,14 +116,24 @@ if (usingLocal) {
 // the user wrote is its own bug, and the reason for ignoring it is worth stating once.
 const localRosterIgnored = hasLocal && !wantsLocal;
 
+// Asking for something that is not there deserves an answer. `--local-roster` with no
+// `.council/members.json` silently used the packaged roster, so a user who had mistyped the path — or
+// was in the wrong directory — got a normal-looking run against a roster they did not choose.
+if (wantsLocal && !hasLocal) {
+  console.error(`\n  --local-roster was passed but ${path.relative(ROOT, localRoster)} does not exist.`);
+  console.error('  Refusing rather than silently using the packaged roster, which is not what you asked for.\n');
+  process.exit(2);
+}
+
 // ── arguments ────────────────────────────────────────────────────────────────
 const argv = process.argv.slice(2);
 const has = (n) => argv.includes(`--${n}`) || argv.some((a) => a.startsWith(`--${n}=`));
 const flag = (n) => argv.find((a) => a.startsWith(`--${n}=`))?.split('=').slice(1).join('=');
 const ctxFiles = [];
+const ctxIndices = new Set();
 for (let i = 0; i < argv.length; i++) {
   if (argv[i] === '--context' || argv[i] === '--card') {
-    while (argv[i + 1] && !argv[i + 1].startsWith('--')) ctxFiles.push(argv[++i]);
+    while (argv[i + 1] && !argv[i + 1].startsWith('--')) { ctxIndices.add(++i); ctxFiles.push(argv[i]); }
   }
 }
 // `=`-style flags given with a SPACE used to have their value swallowed into the question:
@@ -171,7 +181,11 @@ if (unknownFlag) {
   process.exit(1);
 }
 
-const questionTokens = argv.filter((a) => !a.startsWith('--') && !ctxFiles.includes(a));
+// Positional index, not value matching. `!ctxFiles.includes(a)` removed every question WORD that
+// happened to equal a context path — so `--context README.md` plus the question "is README.md stale?"
+// silently lost the word "README.md" from the question. Recording which argv positions were consumed
+// as context values removes the ambiguity entirely.
+const questionTokens = argv.filter((a, i) => !a.startsWith('--') && !ctxIndices.has(i));
 const question = questionTokens.join(' ').trim();
 
 // A quoted question is ONE argument. Several bare words mean the shell split it — and if a flag is
@@ -220,7 +234,10 @@ const rawTimeout = Number(flag('timeout'));
 const timeoutMin = Number.isFinite(rawTimeout) && rawTimeout > 0
   ? Math.min(120, Math.max(1, Math.round(rawTimeout)))
   : 15;
-if (flag('timeout') && String(timeoutMin) !== flag('timeout')) {
+// Compared NUMERICALLY. String comparison made `--timeout=015` and `--timeout=15.0` report as
+// "clamped to 15" when nothing had been clamped — misreporting an honoured value as adjusted, which
+// teaches a user to distrust the message that matters.
+if (flag('timeout') && Number.isFinite(rawTimeout) && rawTimeout !== timeoutMin) {
   console.error(`  --timeout=${flag('timeout')} clamped to ${timeoutMin} minute(s) — the range is 1 to 120.`);
 }
 
@@ -694,6 +711,22 @@ function ask(member, prompt, { stage = '1', raw = false } = {}) {
 
     state.pid = p.pid;   // so an interrupt can kill this member's whole group
 
+    // **Decode as UTF-8 across chunk boundaries, not per chunk.**
+    //
+    // `out += d` on a Buffer calls `toString()` on THAT CHUNK, so a multi-byte character split across
+    // a pipe-buffer boundary is decoded as two invalid halves and becomes U+FFFD. Pipe buffers are
+    // ~64 KiB, so it hits every answer longer than that — and this project's own prose is dense with
+    // em-dashes and arrows, which are exactly the 3-byte characters that straddle.
+    //
+    // Measured: 100,000 em-dashes through a pipe arrived with **8 replacement characters** and did not
+    // match the input. With `setEncoding('utf8')` the stream buffers the partial sequence and hands
+    // over complete characters: zero corruption, exact match.
+    //
+    // Silent corruption of every answer, review and record the tool produces — the failure class this
+    // project ranks above all others — closed by one line.
+    p.stdout.setEncoding('utf8');
+    p.stderr.setEncoding('utf8');
+
     if (plan.stdin !== null) {
       // EPIPE here means the child exited before reading the prompt — a result, not a crash. The
       // close handler will report whatever it managed to say.
@@ -724,7 +757,9 @@ function ask(member, prompt, { stage = '1', raw = false } = {}) {
           out += d;
         }
       }
-      state.bytes = out.length;
+      // BYTES, as the field name says. `String.length` is UTF-16 code units, so a member writing
+      // em-dashes reported a third of its real output volume to every UI reading the stream.
+      state.bytes = Buffer.byteLength(out, 'utf8');
       // Only the newly arrived chunk is scanned, not the whole buffer.
       const fresh = String(d).split('\n').filter((l) => l.trim());
       if (fresh.length) state.lastLine = redactLine(fresh[fresh.length - 1]);
@@ -1173,8 +1208,10 @@ const md = [
     `**Self-votes are excluded from the score above.** They were measured on the first real run and`,
     `they dominate: 3 of 4 judges ranked their own unlabelled answer first — 75% against a 20%`,
     `chance rate. **Anonymisation does not prevent self-enhancement**; a model recognises its own`,
-    `writing. Every answer is still judged by ${good.length - 1} independent `
-      + `${good.length - 1 === 1 ? 'reader' : 'readers'}.`,
+    // The number of reviews that actually PARSED, not the member count. The claim was arithmetic on
+    // roster size and stayed at "judged by 3 independent readers" when two reviews had failed.
+    `writing. In this run each answer was judged by ${Math.max(0, tally.counted - 1)} independent `
+      + `${tally.counted - 1 === 1 ? 'reader' : 'readers'} (${tally.counted} of ${tally.total} reviews parsed).`,
     ``,
   ] : []),
   `**Reasoning overlap is the new one, and it is what "consensus is not correctness" actually`,

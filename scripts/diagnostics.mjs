@@ -235,13 +235,24 @@ export function borda(reviews, ids) {
     // (k−1). Getting that wrong is how the first attempt at this fix still handed 1.5 to a reviewer
     // that ranked four and 1.0 to one that ranked three, which is the same unequal weighting in
     // smaller numbers. Caught by the test that asserts the totals match.
+    // **Per-POSITION weight, fixed across ballots — not per-ballot total.**
+    //
+    // Equalising the total was the first fix, and it inverted the unfairness instead of removing it. A
+    // reviewer that ranked 2 others spread 1.0 across two positions (0.5 each); one that ranked 4
+    // spread it across four (up to 0.5 but as little as 0). So a truncated ballot gave its top pick up
+    // to 2.5x the influence of a complete ballot's top pick — the same bias, pointing the other way.
+    //
+    // What has to be constant is the value of a POSITION, so first place is worth the same from every
+    // reviewer. `n` is the number of answers being ranked, not the length of this ballot, so a short
+    // ballot simply awards fewer points in total — which is correct: it expressed fewer preferences.
     const k = others.length;
-    const totalWeight = (k * (k - 1)) / 2;
+    const n = ids.length - 1;                      // positions available to a reviewer, self excluded
     others.forEach((id, i) => {
       if (!(id in scores)) return;
-      scores[id] += totalWeight === 0 ? 1 : (k - 1 - i) / totalWeight;
+      scores[id] += n <= 1 ? 1 : (n - 1 - i) / (n - 1);
       ranked[id] = (ranked[id] ?? 0) + 1;
     });
+    void k;
   }
 
   // **With two answers the tally is empty, and it used to print a confident tie.**

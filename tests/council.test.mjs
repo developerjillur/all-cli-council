@@ -1567,6 +1567,158 @@ console.log('\n▸ Round five — 7.3/10, and the entry point was the last silen
   }
 }
 
+// ── round six: 7.3/10, and the best single find of all six rounds ────────────
+console.log('\n▸ Round six — 7.3/10, and one line closed a silent-corruption class');
+{
+  // WAS OPEN, and it silently corrupted every long answer. `out += d` on a Buffer calls toString() on
+  // THAT CHUNK, so a multi-byte character split across a pipe-buffer boundary (~64 KiB) decodes as two
+  // invalid halves and becomes U+FFFD. This project's own prose is dense with em-dashes and arrows —
+  // exactly the 3-byte characters that straddle. Measured: 100,000 em-dashes through a pipe arrived
+  // with 8 replacement characters and did not match the input.
+  //
+  // Reproduced here rather than asserted, because it is the kind of claim that must be demonstrated.
+  {
+    const payload = '—'.repeat(50_000);        // 150 KB — crosses several pipe buffers
+    const probe = path.join(os.tmpdir(), `council-enc-${process.pid}.mjs`);
+    fs.writeFileSync(probe, [
+      "import { spawn } from 'node:child_process';",
+      `const payload = ${JSON.stringify(payload)};`,
+      'const run = (setEnc) => new Promise((res) => {',
+      "  const p = spawn('/bin/cat', [], { stdio: ['pipe', 'pipe', 'ignore'] });",
+      "  if (setEnc) p.stdout.setEncoding('utf8');",
+      "  let out = '';",
+      "  p.stdout.on('data', (d) => { out += d; });",
+      "  p.on('close', () => res(out === payload));",
+      '  p.stdin.end(payload);',
+      '});',
+      'const bad = await run(false), good = await run(true);',
+      'console.log(JSON.stringify({ withoutEncoding: bad, withEncoding: good }));',
+    ].join('\n'));
+    const r = spawnSync('node', [probe], { encoding: 'utf8', timeout: 30_000 });
+    fs.rmSync(probe, { force: true });
+    let v = {};
+    try { v = JSON.parse((r.stdout ?? '').trim().split('\n').pop()); } catch { /* probe failed */ }
+    check('raw Buffer concatenation DOES corrupt multi-byte output', v.withoutEncoding === false,
+      'the mechanism, demonstrated rather than asserted');
+    check('...and setEncoding("utf8") fixes it', v.withEncoding === true);
+    const src = fs.readFileSync(path.join(ROOT, 'scripts', 'council.mjs'), 'utf8');
+    check('...and ask() sets it on both streams',
+      /p\.stdout\.setEncoding\('utf8'\)/.test(src) && /p\.stderr\.setEncoding\('utf8'\)/.test(src));
+  }
+
+  const councilSrc = fs.readFileSync(path.join(ROOT, 'scripts', 'council.mjs'), 'utf8');
+
+  // WAS OPEN: the field is called `bytes` and reported UTF-16 code units, so a member writing
+  // em-dashes told every UI a third of its real output volume.
+  check('the event stream\'s `bytes` field is measured in bytes',
+    /Buffer\.byteLength\(out, 'utf8'\)/.test(councilSrc));
+
+  // WAS OPEN, and the previous fix INVERTED the inequality rather than removing it. Equalising the
+  // per-ballot TOTAL meant a reviewer ranking 2 gave its top pick more influence than one ranking 4 —
+  // up to 2.5x. What has to be constant is the value of a POSITION.
+  {
+    const ids = ['a', 'b', 'c', 'd'];
+    const complete = borda([{ id: 'a', parsed: ['a', 'b', 'c', 'd'] }], ids).scores;
+    const truncated = borda([{ id: 'a', parsed: ['a', 'b'] }], ids).scores;
+    const sum = (o) => Object.values(o).reduce((x, y) => x + y, 0);
+    check('first place is worth the same from a short ballot as a complete one',
+      Math.abs(complete['b'] - truncated['b']) < 1e-9,
+      `complete=${complete['b'].toFixed(2)} truncated=${truncated['b'].toFixed(2)}`);
+    check('...and a short ballot simply awards fewer points overall', sum(truncated) < sum(complete),
+      'it expressed fewer preferences, which is correct');
+    check('...and the ordering is still respected', complete['b'] > complete['c'] && complete['c'] > complete['d']);
+  }
+
+  // WAS OPEN: `!ctxFiles.includes(a)` removed every question WORD equal to a context path, so
+  // `--context README.md` plus "is README.md stale?" silently lost the word from the question.
+  {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'council-qtok-'));
+    fs.writeFileSync(path.join(dir, 'README.md'), '# x\n');
+    const r = spawnSync('node', [path.join(ROOT, 'scripts', 'council.mjs'),
+      'is README.md stale?', '--context', 'README.md', '--preflight'],
+      { encoding: 'utf8', timeout: 40_000, cwd: dir });
+    check('a question word matching a context filename survives', r.status === 0, `exit ${r.status}`);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+
+  // WAS OPEN: loadBrief returned on the first EXISTING candidate even when it refused it, so a
+  // symlinked AGENTS.md shadowed a perfectly good .council/BRIEF.md and the run reported "no brief".
+  {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'council-fall-'));
+    try {
+      fs.mkdirSync(path.join(root, '.council'));
+      fs.writeFileSync(path.join(root, '.council', 'BRIEF.md'), '# real rules\nNo embeddings API.\n');
+      fs.writeFileSync(path.join(root, '.env'), 'SECRET=x\n');
+      fs.symlinkSync(path.join(root, '.env'), path.join(root, 'AGENTS.md'));
+      check('a refused candidate no longer shadows a good one',
+        loadBrief(root).source === '.council/BRIEF.md');
+
+      fs.rmSync(path.join(root, '.council', 'BRIEF.md'));
+      const only = loadBrief(root);
+      check('...and a refused-only candidate is reported, not called "none found"',
+        only.source === null && !!only.refused, only.refused ?? '');
+      // This text goes into the PREAMBLE, so it must not carry the machine's directory layout.
+      check('...with no resolved filesystem path in the text sent to vendors',
+        !/\/private|\/Users\/|\/var\/folders/.test(only.text),
+        'this loader was doing, silently, the exact thing it exists to prevent');
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  }
+
+  // WAS OPEN: an unknown promptVia fell past the stdin branch into argv handling — and for a member
+  // with no {prompt}, that meant spawning the CLI with no prompt at all.
+  {
+    const typo = { id: 'x', label: 'X', cmd: 'true', promptVia: 'sdtin', args: ['--print'] };
+    const r = prepare(typo, 'p', os.tmpdir(), 'darwin');
+    check('an unknown promptVia is refused, not defaulted', r.ok === false);
+    check('...and the reason lists the valid modes', /stdin, file, argv/.test(r.reason ?? ''));
+
+    const stray = { id: 'y', label: 'Y', cmd: 'true', promptVia: 'stdin', args: ['--f', '{promptFile}'] };
+    check('a stdin member with a stray {promptFile} is refused',
+      prepare(stray, 'p', os.tmpdir(), 'darwin').ok === false,
+      'it used to spawn with the literal placeholder as a path');
+  }
+
+  // WAS OPEN: String.replace with a string pattern substitutes only the FIRST occurrence.
+  {
+    const twice = { id: 'z', label: 'Z', cmd: 'true', promptVia: 'argv',
+      args: ['{prompt}', '--t', '{timeoutMin}m', '--hard', '{timeoutMin}m'] };
+    const r = prepare(twice, 'BODY', os.tmpdir(), 'darwin', { timeoutMin: 14 });
+    check('every occurrence of a placeholder is substituted',
+      r.args[2] === '14m' && r.args[4] === '14m', r.args.join(' '));
+  }
+
+  // WAS OPEN: the clamp warning compared STRINGS, so `--timeout=015` reported as clamped when nothing
+  // had been — which teaches a user to distrust the message that matters.
+  {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'council-clamp-'));
+    const run = (t) => spawnSync('node', [path.join(ROOT, 'scripts', 'council.mjs'), 'q', '--preflight', `--timeout=${t}`],
+      { encoding: 'utf8', timeout: 40_000, cwd: dir });
+    check('a cosmetically-different but honoured timeout does not report as clamped',
+      !/clamped/.test(run('015').stderr ?? ''));
+    check('...while a genuinely clamped one still does', /clamped/.test(run('0.001').stderr ?? ''));
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+
+  // WAS OPEN: --local-roster with no such file silently used the packaged roster.
+  {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'council-nolocal-'));
+    const r = spawnSync('node', [path.join(ROOT, 'scripts', 'council.mjs'), 'q', '--preflight', '--local-roster'],
+      { encoding: 'utf8', timeout: 40_000, cwd: dir });
+    check('--local-roster with no roster file is refused, not ignored', r.status === 2, `exit ${r.status}`);
+    check('...and says what is missing', /does not exist/.test(r.stderr ?? ''));
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+
+  // WAS AN OVERCLAIM: the comment said O_NOFOLLOW closed the race without saying it covers only the
+  // final path component.
+  check('the write boundary states precisely what O_NOFOLLOW does NOT cover',
+    /a PARENT directory swapped for a symlink/.test(fs.readFileSync(path.join(ROOT, 'scripts', 'safe-write.mjs'), 'utf8')));
+
+  // WAS OPEN: the report claimed every answer had all independent readers even when reviews failed.
+  check('the "independent readers" claim counts parsed reviews, not roster size',
+    /reviews parsed/.test(councilSrc));
+}
+
 // ── the CLI actually runs, end to end, with the flags it documents ───────────
 console.log('\n▸ Integration — the suite must run the CLI, not only import its parts');
 {

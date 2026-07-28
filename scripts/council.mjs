@@ -58,6 +58,7 @@ import { borda, verbosityR, familyMix, reasoningOverlap, parseConfidence, parseR
   aggregateScores, rankedLabels, shuffled, seedNum, familyMajority, labelled, labelledAll,
   OVERLAP_SUSPECT } from './diagnostics.mjs';
 import * as P from './prompts.mjs';
+import { parseArgs, without, FLAGS } from './args.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = process.cwd();
@@ -127,89 +128,78 @@ if (wantsLocal && !hasLocal) {
 }
 
 // ── arguments ────────────────────────────────────────────────────────────────
+//
+// Parsed ONCE, against a declared schema, in scripts/args.mjs. It used to be three ad-hoc helpers
+// over `process.argv` that had no idea what the flags were — and every disagreement between "how a
+// flag is spelled" and "how it is read" became a silent wrong behaviour. Four defects, one root:
+//
+//   · `--detach=1` was a FORK BOMB — the `=` form matched the switch check but the child argv was
+//     built by removing only the bare token, so the child re-detached, without end
+//   · `--context=a.js` passed the known-flag check and was then discarded, running a council with
+//     ZERO context — what this package's own README calls "five informed guesses"
+//   · `--timeout=abc` silently became the 15-minute default
+//   · a typo'd `--members=codx` said "install one" instead of "no such member"
+//
+// The parser refuses instead of guessing, and a boolean given a value is an error rather than a
+// truthy string — that single rule is what makes the fork bomb unreachable rather than merely fixed.
 const argv = process.argv.slice(2);
-const has = (n) => argv.includes(`--${n}`) || argv.some((a) => a.startsWith(`--${n}=`));
-const flag = (n) => argv.find((a) => a.startsWith(`--${n}=`))?.split('=').slice(1).join('=');
-const ctxFiles = [];
-const ctxIndices = new Set();
-for (let i = 0; i < argv.length; i++) {
-  if (argv[i] === '--context' || argv[i] === '--card') {
-    while (argv[i + 1] && !argv[i + 1].startsWith('--')) { ctxIndices.add(++i); ctxFiles.push(argv[i]); }
+const parsed = parseArgs(argv);
+
+if (!parsed.ok) {
+  console.error('');
+  for (const e of parsed.errors) console.error(`  ${e}`);
+  if (parsed.hint === 'unknown') {
+    console.error('\n  If that was part of your question, QUOTE the question. The shell splits it into');
+    console.error('  arguments, and a flag-shaped word would be stripped from the question AND switched');
+    console.error('  on — a different question, in a different mode, reported as success.');
+    console.error('\n      node scripts/council.mjs "Should we use --lenses here?" --context src/x.js');
+    console.error('\n  Or put the question after `--`, and nothing in it is read as a flag:');
+    console.error('\n      node scripts/council.mjs -- Should we use --lenses here?');
   }
-}
-// `=`-style flags given with a SPACE used to have their value swallowed into the question:
-// `--members codex` produced a member filter of undefined and a question ending in "codex". Silent,
-// and it changes both the roster and the question at once. Refused with the correct form instead.
-// `--events` is legitimately BARE (it defaults to a path derived from the slug), so including it
-// here refused `--events "the question"` and told the user to write `--events=the question` — an
-// error message instructing them to do something wrong. Only flags that are meaningless without a
-// value belong in this list.
-const EQ_FLAGS = ['members', 'timeout'];
-const spaceForm = argv.findIndex((a, i) => EQ_FLAGS.includes(a.replace(/^--/, ''))
-  && a.startsWith('--') && argv[i + 1] && !argv[i + 1].startsWith('--'));
-if (spaceForm >= 0) {
-  console.error(`\n  ${argv[spaceForm]} takes its value with an "=": ${argv[spaceForm]}=${argv[spaceForm + 1]}`);
-  console.error(`  Given with a space, the value would be swallowed into the question instead.\n`);
+  if (parsed.hint === 'space-form') {
+    console.error('\n  Given with a space, the value would be swallowed into the question instead.');
+  }
+  console.error(`\n  Options: ${Object.keys(FLAGS).map((f) => `--${f}`).join(' ')}\n`);
   process.exit(1);
 }
 
-// ── the entry point is now held to the same standard as everything downstream ──
-//
-// **An unquoted question was a silent wrong answer**, which is the one outcome this project ranks
-// above a crash — and it happened before any of the machinery that guards against it.
-//
-//     node council.mjs Should we use --lenses here?     ← the shell splits this into arguments
-//
-// `--lenses` was stripped from the question AND silently switched the flag on. The council answered a
-// different question from the one asked, in a different mode than the one intended, and reported
-// success. The same shape swallows `--revise`, `--rubric` and `--allow-uncontained`.
-//
-// So every `--`-prefixed token must be a flag this script knows. An unknown one is a typo or a
-// shell-split question, and both deserve a refusal naming the token rather than a run that quietly
-// reinterprets it.
-const KNOWN_FLAGS = new Set(['context', 'card', 'stage1-only', 'revise', 'members', 'lenses', 'rubric',
-  'peer-review', 'events', 'json-events', 'no-live', 'timeout', 'preflight', 'verify-delivery',
-  'allow-uncontained', 'local-roster', 'detach']);
-const unknownFlag = argv.find((a) => a.startsWith('--')
-  && !KNOWN_FLAGS.has(a.replace(/^--/, '').split('=')[0]));
-if (unknownFlag) {
-  console.error(`\n  Unknown option: ${unknownFlag}`);
-  console.error('  If that was part of your question, QUOTE the question. The shell splits it into');
-  console.error('  arguments, and a flag-shaped word would be stripped from the question and switched');
-  console.error('  on at the same time — a different question, in a different mode, reported as success.');
-  console.error('\n      node scripts/council.mjs "Should we use --lenses here?" --context src/x.js\n');
-  console.error(`  Known options: ${[...KNOWN_FLAGS].map((f) => `--${f}`).join(' ')}\n`);
-  process.exit(1);
-}
+const has = (n) => Boolean(parsed.flags[n]);
+/** The string value of a `=`-style flag, or undefined for a bare switch. */
+const flag = (n) => (typeof parsed.flags[n] === 'string' ? parsed.flags[n] : undefined);
+const ctxFiles = parsed.list.context ?? [];
+const { questionTokens, question } = parsed;
 
-// Positional index, not value matching. `!ctxFiles.includes(a)` removed every question WORD that
-// happened to equal a context path — so `--context README.md` plus the question "is README.md stale?"
-// silently lost the word "README.md" from the question. Recording which argv positions were consumed
-// as context values removes the ambiguity entirely.
-const questionTokens = argv.filter((a, i) => !a.startsWith('--') && !ctxIndices.has(i));
-const question = questionTokens.join(' ').trim();
+// Per-member, in minutes. Clamped by the parser to [1, 120]: `Number(flag) > 0` used to accept 0.0001
+// — a 6-millisecond budget that killed every member before it could speak — and an absurd upper value
+// turns the never-hang guarantee off.
+const timeoutMin = parsed.flags.timeout ?? 15;
+if (parsed.flags.timeoutClamped) {
+  const c = parsed.flags.timeoutClamped;
+  console.error(`  --timeout=${c.from} clamped to ${c.to} minute(s) — the range is ${c.min} to ${c.max}.`);
+}
 
 // A quoted question is ONE argument. Several bare words mean the shell split it — and if a flag is
 // present as well, the odds are that flag was part of the sentence:
 //
 //     node council.mjs Should we use --lenses here?   ->  question "Should we use here?", --lenses ON
 //
-// which is a different question in a different mode, reported as a success. The unknown-flag guard
-// above cannot catch this one, because `--lenses` is a real flag. Token count can, exactly.
+// which is a different question in a different mode, reported as a success. The unknown-flag refusal
+// cannot catch this one, because `--lenses` is a real flag. Token count can, exactly.
 const anyFlag = argv.some((a) => a.startsWith('--'));
-if (questionTokens.length > 1 && anyFlag) {
+if (questionTokens.length > 1 && anyFlag && !argv.includes('--')) {
   console.error(`\n  The question arrived as ${questionTokens.length} separate words, so it was not quoted:`);
   console.error(`      ${questionTokens.map((t) => JSON.stringify(t)).join(' ')}`);
   console.error('\n  QUOTE it. Unquoted, the shell splits the sentence into arguments — and any');
   console.error('  flag-shaped word in it is stripped from the question AND switched on, so the council');
-  console.error('  answers a different question in a different mode and reports success.\n');
-  console.error('      node scripts/council.mjs "the whole question here" --context src/x.js\n');
+  console.error('  answers a different question in a different mode and reports success.');
+  console.error('\n      node scripts/council.mjs "the whole question here" --context src/x.js');
+  console.error('\n  Or pass it after `--`:  node scripts/council.mjs -- the whole question here\n');
   process.exit(1);
 }
 
-// `--context` consumes every following non-flag token, so an unquoted question placed after it is
-// swallowed as a list of file paths and the run dies on "no question" with no hint why. A context
-// entry that is not a readable file is almost always exactly that mistake.
+// `--context` consumes every following word, so an unquoted question placed after it is swallowed as
+// a list of file paths and the run dies on "no question" with no hint why. A context entry that is
+// not a readable file is almost always exactly that mistake.
 const notFiles = ctxFiles.filter((f) => {
   try { return !fs.statSync(path.resolve(ROOT, f)).isFile(); } catch { return true; }
 });
@@ -221,26 +211,13 @@ if (notFiles.length) {
   console.error('\n      node scripts/council.mjs "the question" --context src/a.js src/b.js\n');
   process.exit(1);
 }
+
 const stage1Only = has('stage1-only');
 const useLenses = has('lenses');
 const rubricMode = has('rubric');
 const only = flag('members')?.split(',');
 // Per-member, in minutes. A council of five is bounded by its slowest member, and 15 minutes was
 // chosen for a model that thinks; a smaller budget is a legitimate choice on a smaller question.
-// Clamped. `Number(flag) > 0` accepted 0.0001, which is a 6-millisecond budget — every member
-// killed before it could speak, reported as "timed out after 0 min". And an absurd upper value turns
-// the never-hang guarantee off. 1 minute is the smallest budget a thinking model could ever use;
-// 120 is well past the slowest observed member (8m07s).
-const rawTimeout = Number(flag('timeout'));
-const timeoutMin = Number.isFinite(rawTimeout) && rawTimeout > 0
-  ? Math.min(120, Math.max(1, Math.round(rawTimeout)))
-  : 15;
-// Compared NUMERICALLY. String comparison made `--timeout=015` and `--timeout=15.0` report as
-// "clamped to 15" when nothing had been clamped — misreporting an honoured value as adjusted, which
-// teaches a user to distrust the message that matters.
-if (flag('timeout') && Number.isFinite(rawTimeout) && rawTimeout !== timeoutMin) {
-  console.error(`  --timeout=${flag('timeout')} clamped to ${timeoutMin} minute(s) — the range is 1 to 120.`);
-}
 
 if (!question && !has('verify-delivery')) {
   console.error('Usage: council.mjs "<question>" [--context <file>...] [--events] [--lenses] [--rubric]');
@@ -323,7 +300,10 @@ try {
 // What the caller gets back is enough to attach later from ANY session: the events path, the log
 // path, and the pid. `scripts/status.mjs` turns those into an answer.
 if (has('detach')) {
-  const child = argv.filter((a) => a !== '--detach');
+  // `without()`, not a filter on the bare token. Filtering `a !== '--detach'` left `--detach=1` in
+  // the child's argv, so the child re-detached and so did its child: an unbounded respawn chain in
+  // which the council never ran. Three of four judges found it independently.
+  const child = without(argv, ['detach']);
   if (!child.some((a) => a === '--events' || a.startsWith('--events='))) child.push('--events');
   // No live block in a process with no terminal.
   if (!child.includes('--no-live')) child.push('--no-live');
@@ -334,21 +314,61 @@ if (has('detach')) {
     console.error(`\n  Cannot detach: ${w.reason}\n`);
     process.exit(1);
   }
+  // Through the same boundary as every other output. This was a plain `openSync(logPath, 'w')` —
+  // the newest code in the file, not held to the standard the rest of it enforces, which is exactly
+  // what a judge said about it.
   mkdirpSafe(path.dirname(logPath));
-  const logFd = fs.openSync(logPath, 'w');
+  const logFd = fs.openSync(logPath, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC
+    | (fs.constants.O_NOFOLLOW ?? 0), 0o644);
 
   const kid = spawn(process.execPath, [fileURLToPath(import.meta.url), ...child], {
     cwd: ROOT,
     detached: true,
     stdio: ['ignore', logFd, logFd],
-    env: process.env,
+    env: { ...process.env, COUNCIL_DETACHED: '1' },
   });
   kid.unref();
   fs.closeSync(logFd);
 
+  // **Confirm the child actually came up before claiming it did.** `spawn` succeeding means the fork
+  // happened, not that the process survived its own synchronous startup — a bad roster, an unwritable
+  // events path or a missing member all exit within milliseconds. Reporting "the council is running"
+  // and exiting 0 in that case leaves a watcher waiting forever on a stream that will never grow.
+  //
+  // 400ms is enough for every startup refusal observed (they are all synchronous and immediate) and
+  // short enough not to be a wait. If it is still alive after that, it got past pre-flight.
+  // **The EXIT CODE, not merely liveness.** A first attempt at this asked "is the pid still there
+  // after 400ms", which cannot tell a startup failure from a run that legitimately finished fast —
+  // `--detach --preflight` exits 0 in milliseconds and would have been reported as "NOT started".
+  //
+  // Racing the exit against a short timer answers both questions: still alive means it got past its
+  // synchronous startup; exited 0 means it did the whole job; exited non-zero means it refused, and
+  // the reason is in the log the child was already writing to.
+  const outcome = await new Promise((resolve) => {
+    const t = setTimeout(() => resolve({ alive: true }), 400);
+    kid.once('exit', (code) => { clearTimeout(t); resolve({ alive: false, code: code ?? 0 }); });
+  });
+
+  // Exit 2 is this script's own code for "could not convene" — no member CLI installed. That is a
+  // legitimate answer, not a crash, and calling it "NOT started" would be wrong on any machine
+  // without the CLIs, which includes every CI runner. Only an unexpected non-zero code is a failure.
+  if (!outcome.alive && outcome.code !== 0 && outcome.code !== 2) {
+    let why = '';
+    try { why = fs.readFileSync(logPath, 'utf8').trim().split('\n').slice(-8).join('\n'); } catch { /* nothing written */ }
+    console.error(`\n  The detached council exited immediately with code ${outcome.code}. It was NOT started.\n`);
+    if (why) console.error(`${why}\n`);
+    console.error(`  Full output: ${path.relative(ROOT, logPath)}\n`);
+    process.exit(1);
+  }
+  const finishedFast = !outcome.alive;
+  const couldNotConvene = !outcome.alive && outcome.code === 2;
+
   const evPath = flag('events') || path.join(OUT_DIR, `${slug}.events.ndjson`);
-  process.stderr.write(`\n▸ Detached. The council is running with no parent — this session can die `
-    + `without losing it.\n\n`);
+  process.stderr.write(couldNotConvene
+    ? `\n▸ Detached, but it could not convene — no member CLI is available here. Nothing was spent.\n\n`
+    : finishedFast
+      ? `\n▸ Detached, and it already finished — the work was short enough not to need this.\n\n`
+      : `\n▸ Detached. The council is running with no parent — this session can die without losing it.\n\n`);
   process.stderr.write(`    pid     ${kid.pid}\n`);
   process.stderr.write(`    events  ${path.relative(ROOT, evPath)}\n`);
   process.stderr.write(`    log     ${path.relative(ROOT, logPath)}\n\n`);
@@ -356,7 +376,8 @@ if (has('detach')) {
   process.stderr.write(`  Ask once:   node ${path.relative(ROOT, path.join(HERE, 'status.mjs'))}\n`);
   process.stderr.write(`  Live feed:  node ${path.relative(ROOT, path.join(HERE, 'feed.mjs'))}\n\n`);
   // stdout stays machine-readable: one JSON object, so a caller does not have to parse prose.
-  console.log(JSON.stringify({ detached: true, pid: kid.pid, events: evPath, log: logPath, slug }));
+  console.log(JSON.stringify({ detached: true, running: !finishedFast, convened: !couldNotConvene,
+    pid: kid.pid, events: evPath, log: logPath, slug }));
   process.exit(0);
 }
 
@@ -490,6 +511,17 @@ function resolveCmd(cmd) {
 // promise is worth more than a five-member one that quietly breaks it — and including a writer is a
 // decision for the user to make out loud, not one for this script to make on their behalf.
 const allowUncontained = has('allow-uncontained');
+// A typo in --members used to fall through to "no council member is available — install one", about
+// CLIs the user has installed. The roster knows its own ids; say so.
+if (only) {
+  const known = new Set(CFG.members.map((m) => m.id));
+  const unknown = only.filter((id) => !known.has(id));
+  if (unknown.length) {
+    console.error(`\n  --members named ${unknown.length} id(s) that are not in the roster: ${unknown.join(', ')}`);
+    console.error(`  Available: ${[...known].join(', ')}\n`);
+    process.exit(1);
+  }
+}
 const asked = CFG.members.filter((m) => !only || only.includes(m.id));
 // Anything not positively verified, not only an explicit `false`.
 const uncontained = asked.filter((m) => m.contained !== true);
@@ -513,7 +545,10 @@ ev('run_start', {
   // Without it, a stream that stops mid-run is indistinguishable from one that is merely quiet — and
   // "quiet" is the normal state of this tool for minutes at a time.
   pid: process.pid,
-  detached: has('detach'),
+  // The CHILD is the detached one, and it no longer carries --detach — so asking `has('detach')`
+  // here always answered false in the very stream that is supposed to be the source of truth.
+  // COUNCIL_DETACHED is set on the child's environment instead.
+  detached: process.env.COUNCIL_DETACHED === '1',
   members: requested.map((m) => ({ id: m.id, label: m.label, family: m.family ?? 'unknown' })),
   flags: { lenses: useLenses, rubric: rubricMode, revise: has('revise'), stage1Only, timeoutMin, allowUncontained },
   excludedUncontained: allowUncontained ? [] : uncontained.map((m) => m.id),
@@ -625,8 +660,14 @@ if (has('preflight')) {
 // NODE_OPTIONS is deliberately NOT here. It was, and it undoes the point: `NODE_OPTIONS=--require`
 // runs arbitrary code inside a member's process before its own permission mode is established, so the
 // one variable that looked harmless was the one that could disable containment from the outside.
+// The proxy variables are here because a member with no network is a member that fails, and on a
+// corporate machine that is EVERY member — with an opaque connection error rather than anything
+// pointing at the allowlist. They carry no credentials themselves (a proxy URL with an embedded
+// password would be caught by the secret-shape scan if it ever reached a prompt, and it never does).
 const ENV_ALLOW = ['HOME', 'PATH', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR', 'LANG', 'LC_ALL',
-  'TERM', 'TZ', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_DATA_HOME'];
+  'TERM', 'TZ', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_DATA_HOME',
+  'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy',
+  'ALL_PROXY', 'all_proxy', 'SSL_CERT_FILE', 'SSL_CERT_DIR', 'NODE_EXTRA_CA_CERTS'];
 const memberEnv = Object.fromEntries(
   Object.entries(process.env).filter(([k]) => ENV_ALLOW.includes(k)),
 );
@@ -931,8 +972,11 @@ if (members.length < requested.length) {
 
 // ── context ──────────────────────────────────────────────────────────────────
 const ctx = buildContext(ctxFiles, ROOT);
-const ctxTok = Math.round(ctx.chars / 4);
 const brief = loadBrief(ROOT);
+// The BRIEF counts too. This was `ctx.chars / 4`, which undercounted what every member actually
+// receives by the whole size of the brief — up to 8,000 characters, or 2k tokens, of the thing the
+// warning exists to measure.
+const ctxTok = Math.round((ctx.chars + (brief.text?.length ?? 0)) / 4);
 
 // The budget is shown every run, because the failure at the ceiling is silent: at ~80k one member
 // stopped following instructions rather than erroring. Measured 2026-07-28.

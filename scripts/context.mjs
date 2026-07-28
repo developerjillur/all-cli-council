@@ -254,18 +254,6 @@ export function loadBrief(root) {
       if (!isInside(real, rootReal)) {
         refusals.push(`${rel} — refused, resolves outside the workspace`);
         continue;
-        // eslint-disable-next-line no-unreachable
-        void {
-          // The RESOLVED PATH IS NOT IN THE MESSAGE. `briefMissing` text goes into the preamble, so
-          // naming `/Users/someone/secrets/prod.env` there would send the machine's directory layout to
-          // every vendor — this loader doing, automatically and silently, the exact thing it exists to
-          // prevent. The operator learns the path from the `refused` field, which stays local.
-          text: briefMissing(`\`${rel}\` was found but **refused: it resolves outside the `
-            + `workspace**. A brief is read automatically and prepended to every prompt, so a symlink `
-            + `there would send an arbitrary file to every vendor.`),
-          source: null,
-          refused: `${rel} — refused, resolves outside the workspace (${real})`,
-        };
       }
 
       // Containment was not enough on its own. A symlink named `AGENTS.md` pointing at `.env` in the
@@ -276,18 +264,6 @@ export function loadBrief(root) {
       if (REFUSE.some((re) => re.test(briefRel))) {
         refusals.push(`${rel} — refused, resolves to ${briefRel}, a credential or private-data path`);
         continue;
-        // eslint-disable-next-line no-unreachable
-        void {
-          // **No resolved path in the text.** `briefMissing` output goes into the preamble, so naming
-          // the resolved target there would send the machine's directory layout to every vendor — this
-          // loader doing, automatically and silently, the exact thing it exists to prevent. The
-          // operator learns the path from `refused`, which stays local to the terminal and the run file.
-          text: briefMissing(`\`${rel}\` was found but **refused: it resolves to a credential or `
-            + `private-data path.** A brief is read automatically and sent to every vendor on every `
-            + `call, so a symlink there is the cheapest way to exfiltrate a secret.`),
-          source: null,
-          refused: `${rel} — refused, resolves to ${briefRel}, a credential or private-data path`,
-        };
       }
 
       let text = fs.readFileSync(real, 'utf8').trim();
@@ -298,25 +274,10 @@ export function loadBrief(root) {
       if (SECRET_SHAPES.some((re) => re.test(text))) {
         refusals.push(`${rel} — refused, contents match a secret shape`);
         continue;
-        // eslint-disable-next-line no-unreachable
-        void {
-          text: briefMissing(`\`${rel}\` was found but **refused: its contents match a secret shape.** `
-            + `A brief is sent to every vendor on every call, so a key in it leaks further than a key `
-            + `in a file you pass deliberately. Remove it, or write \`.council/BRIEF.md\` instead.`),
-          source: null,
-          refused: `${rel} — refused, contents match a secret shape`,
-        };
       }
       if (text.includes(NUL)) {
         refusals.push(`${rel} — refused, contains a NUL byte`);
         continue;
-        // eslint-disable-next-line no-unreachable
-        void {
-          text: briefMissing(`\`${rel}\` was found but **refused: it contains a NUL byte**, which would `
-            + `make the prompt unspawnable for any member delivered through argv.`),
-          source: null,
-          refused: `${rel} — refused, contains a NUL byte`,
-        };
       }
 
       const full = text.length;

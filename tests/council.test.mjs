@@ -26,6 +26,7 @@ import { rankedLabels, borda, familyMix, familyMajority, reasoningOverlap, parse
   aggregateScores, shuffled, contentTokens, labelled, labelledAll } from '../scripts/diagnostics.mjs';
 import { assignLenses, LENSES, stage1, stage2, rubric, rubric1b, RUBRIC_DIMENSIONS } from '../scripts/prompts.mjs';
 import { judgeOutput, MIN_ANSWER_CHARS } from '../scripts/judge-output.mjs';
+import { parseArgs, without, FLAGS } from '../scripts/args.mjs';
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
@@ -1891,18 +1892,30 @@ console.log('\n▸ Detach, status, feed — the three things a supervising agent
     check('...and it forces the event stream on', /if \(!child\.some\(\(a\) => a === '--events'/.test(src),
       'detaching without it would launch a process nobody can observe');
     check('...and prints machine-readable paths on stdout',
-      /JSON\.stringify\(\{ detached: true, pid: kid\.pid/.test(src));
+      /JSON\.stringify\(\{ detached: true, running: !finishedFast/.test(src));
     check('the pid is recorded in the stream, so liveness is knowable', /pid: process\.pid,/.test(src));
 
-    // A real detached launch, with a member that does not exist so nothing is spent.
+    // A real detached launch. `--preflight` so nothing is spent — and note that this ALSO exercises
+    // the "finished before we looked" path, which an earlier version of the liveness check reported as
+    // a startup failure because it only asked whether the pid still existed.
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'council-detach-'));
-    const r = spawnSync('node', [cli, 'a detached question', '--members=nonexistent-xyz', '--detach'],
+    const r = spawnSync('node', [cli, 'a detached question', '--preflight', '--detach'],
       { encoding: 'utf8', timeout: 30_000, cwd: dir });
-    check('--detach returns immediately instead of blocking', r.status === 0, `exit ${r.status}`);
+    // Exit 0 with members present, and still 0 without them — "could not convene" is an answer.
+    check('--detach returns immediately instead of blocking', r.status === 0, crashed(r));
     let payload = {};
     try { payload = JSON.parse((r.stdout ?? '').trim().split('\n').pop()); } catch { /* nothing printed */ }
     check('...and hands back a pid, an events path and a log path',
       Boolean(payload.pid && payload.events && payload.log), JSON.stringify(payload).slice(0, 80));
+    check('...and says whether it is still running', typeof payload.running === 'boolean');
+
+    // A child that REFUSES at startup must be reported as not started, with its own reason — not as a
+    // successful launch a watcher then waits forever on.
+    const bad = spawnSync('node', [cli, 'q', '--members=nonexistent-xyz', '--detach'],
+      { encoding: 'utf8', timeout: 30_000, cwd: dir });
+    check('a detached child that dies on startup is REPORTED, not claimed as running',
+      /was NOT started/.test(bad.stderr ?? ''), (bad.stderr ?? '').split('\n')[1] ?? '');
+    check('...quoting the child\'s own reason', /not in the roster/.test(bad.stderr ?? ''));
     fs.rmSync(dir, { recursive: true, force: true });
   }
 }
@@ -2045,6 +2058,158 @@ console.log('\n▸ fd 3 — a consumer that stops reading must not stop the coun
     /The FILE sink stays synchronous on purpose/.test(src));
 }
 
+// ── the entry point, parsed once against a schema ────────────────────────────
+console.log('\n▸ Arguments — four defects, one root: parsing that did not know what the flags were');
+{
+  const P = (...a) => parseArgs(a);
+
+  // WAS A FORK BOMB, found independently by three of four judges. `has('detach')` matched the `=`
+  // form, and the child argv was built with `argv.filter((a) => a !== '--detach')` — which removes the
+  // BARE token only. So the child re-detached, and its child re-detached, without end, and **the
+  // council never ran**. A boolean that accepts a value is the whole cause; refusing one makes it
+  // unreachable rather than merely fixed.
+  check('--detach=1 is REFUSED, so the respawn chain is unreachable', P('q', '--detach=1').ok === false,
+    P('q', '--detach=1').errors?.[0]);
+  check('...with a message naming the token and the correct form',
+    /is a switch and takes no value/.test(P('q', '--detach=1').errors?.[0] ?? ''));
+  check('...and the bare switch still works', P('q', '--detach').flags.detach === true);
+  check('without() strips BOTH spellings, which the hand-rolled filter did not',
+    without(['q', '--detach=1', '--lenses'], ['detach']).join(' ') === 'q --lenses',
+    without(['q', '--detach=1'], ['detach']).join(' '));
+  for (const b of Object.entries(FLAGS).filter(([, s]) => s.type === 'bool').map(([n]) => n)) {
+    check(`--${b}=x is refused (every switch, not just --detach)`, P('q', `--${b}=x`).ok === false);
+  }
+
+  // WAS OPEN: `--context=a.js` passed the known-flag check and was then thrown away, so the council
+  // ran with ZERO context — which this package's own README calls "five informed guesses". Silent.
+  check('--context=a.js is collected (it used to be discarded)',
+    P('q', '--context=a.js').list.context?.join() === 'a.js');
+  check('--context a.js b.js still works', P('q', '--context', 'a.js', 'b.js').list.context?.join() === 'a.js,b.js');
+  check('--context is repeatable in the = form',
+    P('q', '--context=a.js', '--context=b.js').list.context?.join() === 'a.js,b.js');
+  check('--card folds into the same list', P('q', '--card=c.md').list.context?.join() === 'c.md');
+  check('--context with no files is refused', P('q', '--context').ok === false);
+  check('--context= with an empty value is refused', P('q', '--context=').ok === false);
+
+  // WAS OPEN: Number('abc') is NaN, NaN fails `> 0`, and the code fell into the 15-minute default —
+  // so a typo silently chose a budget nobody asked for.
+  check('--timeout=abc is refused, not silently defaulted', P('q', '--timeout=abc').ok === false,
+    P('q', '--timeout=abc').errors?.[0]);
+  check('--timeout=20 passes through untouched', P('q', '--timeout=20').flags.timeout === 20);
+  check('--timeout=0.001 clamps to the floor', P('q', '--timeout=0.001').flags.timeout === 1);
+  check('...and records that it clamped', Boolean(P('q', '--timeout=0.001').flags.timeoutClamped));
+  check('--timeout=99999 clamps to the ceiling', P('q', '--timeout=99999').flags.timeout === 120);
+  check('--timeout=015 is honoured and NOT reported as clamped',
+    P('q', '--timeout=015').flags.timeout === 15 && !P('q', '--timeout=015').flags.timeoutClamped,
+    'the old check compared strings, so a cosmetic difference read as a clamp');
+
+  // The space form is refused rather than supported, because `--members codex` would take "codex"
+  // out of the question — changing the roster and the question at once.
+  check('--members without = is refused', P('q', '--members', 'codex').ok === false);
+  check('...naming the corrected form', /--members=codex/.test(P('q', '--members', 'codex').errors?.[0] ?? ''));
+  check('--members=codex works', P('q', '--members=codex').flags.members === 'codex');
+
+  // --events is the one flag that is meaningful bare AND with a value.
+  check('--events bare means "yes"', P('q', '--events').flags.events === true);
+  check('--events=path means that path', P('q', '--events=/tmp/x.ndjson').flags.events === '/tmp/x.ndjson');
+
+  check('an unknown flag is refused', P('q', '--nope').ok === false);
+  check('...and the hint explains the quoting trap', P('q', '--nope').hint === 'unknown');
+
+  // A question word that matches a context filename must survive — it used to be filtered out by
+  // value, so `--context README.md` plus "is README.md stale?" lost the word from the question.
+  check('a question word matching a context path survives',
+    P('is README.md stale?', '--context', 'README.md').question === 'is README.md stale?');
+
+  // `--` is the escape hatch for a question that legitimately contains a flag-shaped word.
+  check('everything after -- is question text, flags included',
+    P('--', 'use', '--lenses', 'here').question === 'use --lenses here');
+  check('...and no flag from after -- is switched on', P('--', 'use', '--lenses').flags.lenses === undefined);
+
+  // Nothing may be silently dropped: council.mjs must not keep its own parsing any more.
+  const src = fs.readFileSync(path.join(ROOT, 'scripts', 'council.mjs'), 'utf8');
+  check('council.mjs parses through args.mjs rather than scanning argv itself',
+    /const parsed = parseArgs\(argv\)/.test(src));
+  check('...and no hand-rolled startsWith("--") flag scan is left',
+    !/argv\.find\(\(a\) => a\.startsWith\(`--\$\{n\}=`\)\)/.test(src));
+  check('...and --detach strips its own flag with without()', /without\(argv, \['detach'\]\)/.test(src));
+}
+
+// ── round seven: 6.9/10, DOWN from 7.3 — and correctly ───────────────────────
+console.log('\n▸ Round seven — the newest feature was not held to the standard the rest enforces');
+{
+  const src = fs.readFileSync(path.join(ROOT, 'scripts', 'council.mjs'), 'utf8');
+
+  // WAS OPEN: the env allowlist stripped the proxy variables, so on any corporate machine EVERY
+  // member fails with an opaque connection error and nothing points at the allowlist as the cause.
+  {
+    const allow = src.match(/const ENV_ALLOW = \[[\s\S]*?\];/)?.[0] ?? '';
+    for (const v of ['HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'NODE_EXTRA_CA_CERTS']) {
+      check(`${v} reaches members — a member with no network is a member that fails`, allow.includes(v));
+    }
+    check('...and NODE_OPTIONS still does not', !allow.includes('NODE_OPTIONS'),
+      'it can inject --require before a member\'s permission mode exists');
+    check('...and nothing credential-shaped was added', !/API_KEY|_TOKEN|SECRET|PASSWORD/.test(allow));
+  }
+
+  // WAS OPEN: `run_start.detached` asked `has('detach')` in the CHILD, which by design no longer
+  // carries the flag — so the field was always false in the stream that is the source of truth.
+  check('a detached run identifies itself as detached', /COUNCIL_DETACHED === '1'/.test(src));
+  check('...because the parent sets it on the child\'s environment', /COUNCIL_DETACHED: '1'/.test(src));
+
+  // WAS OPEN: the detach log was the one output opened with a plain 'w', skipping O_NOFOLLOW and the
+  // boundary every other output goes through — the newest code, not held to the file's own standard.
+  check('the detach log is opened with O_NOFOLLOW like every other output',
+    /const logFd = fs\.openSync\(logPath, fs\.constants\.O_WRONLY[\s\S]{0,120}O_NOFOLLOW/.test(src));
+
+  // WAS OPEN: --detach reported "the council is running" and exited 0 before anything confirmed the
+  // child had survived its own synchronous startup — so a watcher waited forever on a dead stream.
+  check('--detach confirms the child got past startup before claiming success',
+    /const outcome = await new Promise/.test(src));
+  check('...by racing the EXIT CODE, not merely asking whether the pid exists',
+    /kid\.once\('exit'/.test(src),
+    'liveness alone cannot tell a crash from a run that legitimately finished fast');
+  check('...and exit 2 ("could not convene") is not treated as a crash',
+    /outcome\.code !== 2/.test(src), 'that is the state of every CI runner');
+  check('...and prints the child\'s own output when it is not',
+    /The detached council exited immediately/.test(src));
+
+  // WAS OPEN: a typo'd --members fell through to "install one", about CLIs the user has installed.
+  check('a typo\'d --members id names the roster instead of blaming the install',
+    /not in the roster/.test(src));
+
+  // WAS OPEN: the budget warning counted the pack but not the brief — up to 8,000 characters of the
+  // very thing it exists to measure.
+  check('the context-budget estimate includes the brief',
+    /\(ctx\.chars \+ \(brief\.text\?\.length \?\? 0\)\) \/ 4/.test(src));
+
+  // WAS OPEN: `**1.** Response C` puts the emphasis around the ORDINAL, so the marker sat between the
+  // digit and the period and the pattern missed it — falling through to the permissive fallback,
+  // where prose can vote.
+  check('bolded ordinals are still ordinals',
+    rankedLabels('FINAL RANKING:\n**1.** Response C\n**2.** Response A').join('') === 'CA');
+  check('...and plain ones still work',
+    rankedLabels('FINAL RANKING:\n1. Response C\n2. Response A').join('') === 'CA');
+  check('...and prose still cannot vote',
+    rankedLabels('FINAL RANKING:\n**1.** Response C\n**2.** Response A — weaker than Response C').join('') === 'CA');
+
+  // WAS OPEN: `[^a-z0-9_.$/-]` contains `$/-`, which is a RANGE from 0x24 to 0x2d — so %, &, ', (,
+  // ), *, + and , all counted as word characters and got glued onto tokens, which then failed to
+  // match the same word written cleanly.
+  {
+    const t = contentTokens('retry(queue) & cache%hit');
+    check('punctuation is not glued into tokens', ![...t].some((w) => /[%&()*+,]/.test(w)),
+      [...t].join(','));
+    check('...and the real words still come through', t.has('retry') && t.has('queue') && t.has('cache'));
+  }
+
+  // WAS OPEN, and it was mine: three `void {…}` blocks of unreachable code left behind when
+  // loadBrief was changed to collect refusals and continue.
+  check('no unreachable void-object blocks are left in context.mjs',
+    !/void \{\n/.test(fs.readFileSync(path.join(ROOT, 'scripts', 'context.mjs'), 'utf8')),
+    'dead code that looks like it does something is worse than none');
+}
+
 // ── the CLI actually runs, end to end, with the flags it documents ───────────
 console.log('\n▸ Integration — the suite must run the CLI, not only import its parts');
 {
@@ -2094,7 +2259,8 @@ console.log('\n▸ Integration — the suite must run the CLI, not only import i
     noQ.status === 1 && /Usage:/.test(noQ.stderr ?? ''), `exit ${noQ.status}`);
   const spaced = run(['q', '--members', 'codex', '--preflight']);
   check('a space-separated =-flag is refused with the right form',
-    spaced.status === 1 && /takes its value with an "="/.test(spaced.stderr ?? ''), `exit ${spaced.status}`);
+    spaced.status === 1 && /needs its value attached with "="/.test(spaced.stderr ?? ''),
+    `exit ${spaced.status} — the message now comes from args.mjs and names the corrected form`);
 
   // Every script must at least parse and import cleanly — the cheapest possible catch for the bug
   // above, applied to all of them rather than to the one that broke.

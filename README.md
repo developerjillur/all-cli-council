@@ -7,7 +7,7 @@
 [![node](https://img.shields.io/badge/node-%3E%3D22-brightgreen)](https://nodejs.org)
 [![dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)](#quick-start)
 [![API keys](https://img.shields.io/badge/API%20keys-none-brightgreen)](#the-members)
-[![tests](https://img.shields.io/badge/tests-451-blue)](tests/council.test.mjs)
+[![tests](https://img.shields.io/badge/tests-518-blue)](tests/council.test.mjs)
 
 **Four models. Three vendors. They rank each other blind. You decide.**
 
@@ -131,6 +131,7 @@ all-cli-council/
 │   ├── prompts.mjs              every prompt, incl. the lenses and the rubric
 │   ├── prompt-delivery.mjs      stdin / file / argv, and the platform limits
 │   ├── diagnostics.mjs          every number printed above a score
+│   ├── args.mjs                 the command line, parsed once against a schema
 │   ├── safe-write.mjs           the ONE place this package writes anything
 │   ├── ansi.mjs                 the two escape sequences, without a control byte in source
 │   ├── events.mjs               the NDJSON event stream + its reducer
@@ -141,7 +142,7 @@ all-cli-council/
 │   ├── verify-containment.mjs   proves each member cannot write
 │   ├── judge-output.mjs         is this an answer, or a CLI saying it cannot answer
 │   └── members.json             the roster. Override with .council/members.json
-├── tests/council.test.mjs       451 cases, spends nothing
+├── tests/council.test.mjs       518 cases, spends nothing
 └── .claude-plugin/              plugin + marketplace manifests
 ```
 
@@ -171,7 +172,7 @@ which is what "installed as a plugin" actually means:
 ✅  a real run writes into the USER project                .council/runs/{md,json,ndjson}
 ✅  the plugin directory is untouched                      git status: 0 changed files
 ✅  the environment allowlist holds                        7 passed to members, 50 withheld
-✅  451/451 tests pass from the fresh clone                and with no `npm install`
+✅  518/518 tests pass from the fresh clone                and with no `npm install`
 ```
 
 **4/4, not 5/5** — `grok` is excluded by default because it cannot be prevented from writing. The
@@ -610,6 +611,7 @@ test, and it is now the most useful thing in this repo's history.
 | 4 | **7.0** | 5.5–7.8 | correctness 6.5 | 326 |
 | 5 | **7.3** | 6.5–8 | correctness 7.0 | 363 |
 | 6 | **7.3** | 6–7.7 | correctness 7.0 | 385 |
+| 7 | **6.9** | 6.4–7.8 | robustness 6.0 | 518 |
 
 **Roughly a hundred defects, every one reproduced before it was fixed and every one now a test.** The
 full accounting is in the commit messages — `git log` reads as the honest version of this section. What
@@ -911,7 +913,7 @@ Listed because a tool that hides these is worth less than one without them.
 ## Tests
 
 ```bash
-node tests/council.test.mjs     # 451 cases, spends nothing
+node tests/council.test.mjs     # 518 cases, spends nothing
 ```
 
 **Every case was demonstrated OPEN before it was closed** — absolute-path traversal, symlink

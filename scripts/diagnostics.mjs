@@ -55,7 +55,7 @@ export function contentTokens(text) {
   // with a pack that wrote `src/queue.js` — the pack's vocabulary was not subtracted, and the terms
   // most likely to be written two ways are exactly the identifiers every member discusses. Keeping
   // the compound as well means an answer that quotes a full path still matches one that does.
-  for (const raw of String(text ?? '').toLowerCase().split(/[^a-z0-9_.$/-]+/)) {
+  for (const raw of String(text ?? '').toLowerCase().split(/[^a-z0-9_.$/-]+/u)) {
     const compound = raw.replace(/^[.\-/]+|[.\-/]+$/g, '');
     if (!compound) continue;
     for (const w of [compound, ...compound.split(/[./\-_]+/)]) {
@@ -178,7 +178,7 @@ export function rankedLabels(text) {
   // So a label only counts when it is **ordinal-anchored**: preceded by a position marker — `1.`,
   // `2)`, `-`, `*`, `#` — with nothing but whitespace between. That is what a ranking looks like in
   // every format a model actually emits, inline or one-per-line, and it is not what prose looks like.
-  const ordinal = /(?:^|[\n\r]|\s)(?:\d{1,2}\s*[.)\]:]|[-*•])\s*(?:\*\*)?\s*Response\s+([A-Z])\b/gi;
+  const ordinal = /(?:^|[\n\r]|\s)\**\s*(?:\d{1,2}\s*\**\s*[.)\]:]|[-*•])\s*\**\s*Response\s+([A-Z])\b/gi;
   const found = [...block.matchAll(ordinal)].map((m) => m[1].toUpperCase());
 
   // Fallback: a reviewer that emitted no ordinals at all — "Response C, Response A, Response B" on one

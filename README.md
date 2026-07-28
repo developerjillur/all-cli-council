@@ -142,7 +142,9 @@ all-cli-council/
 │   ├── verify-containment.mjs   proves each member cannot write
 │   ├── judge-output.mjs         is this an answer, or a CLI saying it cannot answer
 │   └── members.json             the roster. Override with .council/members.json
-├── tests/council.test.mjs       518 cases, spends nothing
+├── tests/
+│   ├── council.test.mjs         518 cases, spends nothing
+│   └── survives-session-death.mjs  one live call: SIGKILL the session, mid-run
 └── .claude-plugin/              plugin + marketplace manifests
 ```
 
@@ -913,13 +915,54 @@ Listed because a tool that hides these is worth less than one without them.
 ## Tests
 
 ```bash
-node tests/council.test.mjs     # 518 cases, spends nothing
+node tests/council.test.mjs              # 518 cases, spends nothing
+node tests/survives-session-death.mjs    # one live call — proves --detach for real
 ```
 
-**Every case was demonstrated OPEN before it was closed** — absolute-path traversal, symlink
-escape, a private key with no telling suffix, ranking-block spoofing, a duplicate label
-outvoting a careful reviewer, prompt injection, a quota message accepted as an answer, and a
-SIGTERM-resistant child that held the process open after the run had finished.
+**Every case was demonstrated OPEN before it was closed** — absolute-path traversal, symlink escape, a
+private key with no telling suffix, ranking-block spoofing, a duplicate label outvoting a careful
+reviewer, prompt injection, a quota message accepted as an answer, a SIGTERM-resistant child holding
+the process open, a NUL byte unspawning a whole member, a recursive `mkdir` that hangs forever under
+procfs, and a `--detach=1` fork bomb.
+
+### What "tested" means here, precisely
+
+Not all 518 are equal, and pretending otherwise would be the kind of claim this repo keeps a list of:
+
+| | count | what it proves |
+|---|---|---|
+| **behavioural** | **439** | runs the code or spawns the process and checks what happens |
+| **source assertions** | **79** | that a file *contains* something — `O_NOFOLLOW` is used, `NODE_OPTIONS` is not in the allowlist, no recursive `mkdir` remains |
+
+The 79 are real and worth having — several of them are how a fix stays fixed, and "no `mkdirSync(...,
+{recursive:true})` anywhere in `scripts/`" is exactly the assertion that keeps a hang from coming
+back. But **they verify that code was written a certain way, not that the behaviour follows.** Between
+those two sits an operating system, and this repo has now been surprised by that OS twice: a recursive
+`mkdir` that blocks forever, and a `writeSync` to an undrained pipe that never returns.
+
+So the load-bearing claim got a real test rather than a grep. `--detach` exists for exactly one
+reason — a 10–30 minute run must not die with its session — and
+[`tests/survives-session-death.mjs`](tests/survives-session-death.mjs) launches a council, **SIGKILLs
+the launching process group mid-run**, and waits to see whether the answer still arrives:
+
+```
+✅ the council is re-parented away from its launcher — PPID 1
+✅ ...and is NOT in the launcher's process group
+✅ the council is RUNNING before the session is killed
+✅ the session is dead
+✅ the council SURVIVED it
+✅ the orphaned run reached a terminal state — state: finished
+✅ ...containing a real answer, not a stub — 10004 chars
+```
+
+The third line is the one that makes it conclusive. A first version killed the launcher, saw the
+council was gone, and reported failure — when the council had simply finished first. **"Killed" and
+"already finished" are indistinguishable unless you establish it was running before you pull the
+rug** — which is the exact confusion `status.mjs` exists to prevent, committed by the test written to
+validate it.
+
+It is a separate file because it makes one live call, and the main suite's promise to spend nothing is
+why it can run on every push.
 
 ---
 

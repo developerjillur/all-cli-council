@@ -45,7 +45,19 @@ export const FIRST_LINE_ONLY = [
   /\b429\b/,
   /\btoo many requests\b/i,
   /\bunauthorized\b/i,
-  /^\s*error[: ]/i,
+  // WAS A FALSE POSITIVE, and it discarded real answers silently — the exact cost this file's own
+  // header warns is worse than the thing being guarded against.
+  //
+  // The pattern was `/^\s*error[: ]/i`, which matches any first line beginning "Error " — including
+  //   "Error handling here is the weak point of the whole design, and it shows up in the retry path."
+  // a 99-character opener, under STATUS_LINE_MAX, from a member answering the question well. It was
+  // thrown away with no trace but a one-line reason nobody reads.
+  //
+  // A CLI announcing an error uses punctuation or a code: `error:`, `error -`, `Error [E1234]`. An
+  // English sentence starting with the word "error" continues with a noun. Requiring the delimiter
+  // keeps the status messages and releases the prose.
+  /^\s*error\s*[:\-–—[(#]/i,
+  /^\s*(fatal|panic)\b/i,
 ];
 
 /** Below this, it is a status line rather than a considered answer. */

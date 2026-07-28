@@ -127,14 +127,22 @@ export function prepare(member, prompt, scratch, platform = process.platform) {
   }
 
   // argv — allowed, size-checked, and honest about what it costs.
+  //
+  // Measured in BYTES, not characters. The kernel counts bytes; `String.length` counts UTF-16 code
+  // units. This repo's own prose is full of em-dashes and arrows at 3 bytes each, so the two numbers
+  // diverge badly on exactly the content it is most likely to be given: 60,000 em-dashes is 60,000
+  // chars — comfortably under the 120,000 ceiling — and 180,000 bytes, which the kernel refuses.
+  // The guard would have waved it through and the spawn would have failed as E2BIG, which is the
+  // precise failure this function exists to convert into a clear refusal.
   const limit = argvCeiling(platform);
-  if (prompt.length > limit) {
+  const bytes = Buffer.byteLength(prompt, 'utf8');
+  if (bytes > limit) {
     return {
       ok: false, via,
-      reason: `prompt is ${prompt.length.toLocaleString()} chars and this member can only be given `
-        + `it through argv, which ${platform} caps at ~${limit.toLocaleString()}. Send fewer `
-        + `--context files, or drop this member with --members=. Refused before spending rather `
-        + `than failing as E2BIG mid-run.`,
+      reason: `prompt is ${bytes.toLocaleString()} bytes (${prompt.length.toLocaleString()} chars) `
+        + `and this member can only be given it through argv, which ${platform} caps at `
+        + `~${limit.toLocaleString()} bytes. Send fewer --context files, or drop this member with `
+        + `--members=. Refused before spending rather than failing as E2BIG mid-run.`,
     };
   }
   return {
@@ -154,7 +162,18 @@ export function canary() {
   const token = `COUNCIL-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
   return {
     token,
-    prompt: `Reply with exactly this word and nothing else: ${token}`,
+    // **The reply is deliberately a sentence, not a bare token, and that is a bug fix.**
+    //
+    // The first version asked for the token alone. The token is 16 characters; `judge-output.mjs`
+    // rejects anything under `MIN_ANSWER_CHARS` (24) as "too short to be an answer". So a member
+    // that complied *exactly* was reported as **NO CANARY — the prompt is not arriving**, on a
+    // channel that worked perfectly. The one feature whose entire job is catching a silent
+    // false negative was itself a guaranteed false negative. Found by this package grading itself.
+    //
+    // Fixed twice over, deliberately: the reply is now comfortably longer than the floor, AND
+    // `--verify-delivery` judges the raw output for the token rather than routing a probe through
+    // the answer heuristics, which were written for answers and do not apply to a canary.
+    prompt: `Reply with exactly this line and nothing else:\n\nDELIVERY CONFIRMED ${token}`,
     /**
      * A member whose prompt never arrived answers *something* — a greeting, an offer to help.
      * Only the token proves the bytes got there.

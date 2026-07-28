@@ -35,9 +35,12 @@
 //      subtracted out. See diagnostics.mjs.
 //
 //   node scripts/council.mjs "<question>" [--context file ...]
-//        [--stage1-only] [--revise] [--members=id,id] [--lenses] [--rubric]
+//        [--stage1-only] [--revise] [--members=id,id] [--lenses] [--rubric] [--peer-review]
 //        [--events[=path]] [--json-events] [--no-live] [--timeout=<min>]
-//        [--preflight] [--verify-delivery]
+//        [--preflight] [--verify-delivery] [--allow-uncontained] [--local-roster]
+//
+//   node scripts/verify-containment.mjs        prove no member can write. Exit 3 if one can.
+//   node scripts/watch.mjs                    follow a run's event stream from anywhere
 
 import fs from 'node:fs';
 import os from 'node:os';
@@ -45,22 +48,70 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { buildContext, loadBrief } from './context.mjs';
+import { buildContext, loadBrief, VERIFIED_OBEDIENT_TOKENS } from './context.mjs';
 import { judgeOutput } from './judge-output.mjs';
 import { createEmitter, redactLine, SCHEMA } from './events.mjs';
 import { createRenderer } from './render.mjs';
 import { prepare, deliveryOf, canary, argvCeiling } from './prompt-delivery.mjs';
 import { borda, verbosityR, familyMix, reasoningOverlap, parseConfidence, parseRubric,
-  aggregateScores, rankedLabels, OVERLAP_SUSPECT } from './diagnostics.mjs';
+  aggregateScores, rankedLabels, shuffled, seedNum, OVERLAP_SUSPECT } from './diagnostics.mjs';
 import * as P from './prompts.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = process.cwd();
-// Members: the project's own roster if it has one, otherwise the packaged default.
-const localRoster = path.join(process.cwd(), '.council', 'members.json');
-const rosterPath = fs.existsSync(localRoster) ? localRoster : path.join(HERE, 'members.json');
-const CFG = JSON.parse(fs.readFileSync(rosterPath, 'utf8'));
 const OUT_DIR = path.join(ROOT, '.council', 'runs');
+
+// ── the roster, and why a repo is no longer allowed to supply one silently ────
+//
+// **This was arbitrary command execution, reachable by cloning a repository.**
+//
+// A `.council/members.json` in the working directory used to be loaded in preference to the packaged
+// one, with no opt-in. Every field in it is attacker-controlled: `cmd` and `args` are what gets
+// spawned, `scratchDir` is where, and `contained: true` is the flag that tells this script the member
+// cannot write files. So `git clone`, then run a council in that repo — which the skill will do by
+// itself when a decision looks expensive to reverse — and the repo chooses the command.
+//
+// It is worse than an ordinary config-injection bug because the containment check is *also* in the
+// file being trusted. A hostile roster declares itself contained and the guard that would have
+// excluded it reads the attacker's answer to its own question.
+//
+// Two rules, and the second is the one that matters:
+//
+//   1. A repo-local roster is used only when explicitly asked for (`--local-roster`).
+//   2. **`contained` is never honoured from a repo-local roster.** Containment is something
+//      `verify-containment.mjs` demonstrates, not something a file claims. Members from a local
+//      roster are treated as uncontained, so `--allow-uncontained` is also required to run them.
+//
+// The packaged roster keeps its `contained` values, because those were measured and it ships with
+// the code rather than with the user's data.
+const localRoster = path.join(ROOT, '.council', 'members.json');
+const wantsLocal = process.argv.includes('--local-roster');
+const hasLocal = fs.existsSync(localRoster);
+const usingLocal = hasLocal && wantsLocal;
+const rosterPath = usingLocal ? localRoster : path.join(HERE, 'members.json');
+
+let CFG;
+try {
+  CFG = JSON.parse(fs.readFileSync(rosterPath, 'utf8'));
+} catch (e) {
+  console.error(`\n  Could not read the roster at ${rosterPath}: ${e.message}\n`);
+  process.exit(2);
+}
+if (!Array.isArray(CFG.members) || !CFG.members.length) {
+  console.error(`\n  The roster at ${rosterPath} has no members array.\n`);
+  process.exit(2);
+}
+
+if (usingLocal) {
+  // Stripped before anything reads it, so no later code path can be fooled by a value that came
+  // from the repo. Belt and braces: the field is also absent rather than false, so a future
+  // `m.contained !== false` check cannot accidentally treat it as contained.
+  CFG.members = CFG.members.map(({ contained, containmentVerified, ...m }) => ({ ...m, contained: false }));
+}
+
+// A local roster that exists but was NOT opted into has to be mentioned. Silently ignoring a file
+// the user wrote is its own bug, and the reason for ignoring it is worth stating once.
+const localRosterIgnored = hasLocal && !wantsLocal;
 
 // ── arguments ────────────────────────────────────────────────────────────────
 const argv = process.argv.slice(2);
@@ -129,16 +180,52 @@ if (eventsPath && emitter.broken) {
 // **Nothing is ever retried.** A CLI that is missing now will be missing in thirty seconds, and a
 // quota that is exhausted does not refill while you wait. Retrying would turn a clear answer — "you
 // have four of five" — into an indefinite hang, which is the failure this whole section prevents.
-function onPath(cmd) {
+// **Windows is not supported, and saying so is the fix.**
+//
+// This function splits PATH on ':', which mangles `C:\\...`; it ignores PATHEXT, so `codex.cmd`
+// is invisible; and the teardown in ask() uses `process.kill(-pid)`, which win32 has no equivalent
+// for. `ARGV_CEILING.win32` exists in prompt-delivery.mjs as documentation of the platform's real
+// limit, not as a claim that the runtime works there — a claim this refuses loudly rather than
+// discovering as "every member is missing".
+if (process.platform === 'win32') {
+  console.error('\n  Windows is not supported. Executable lookup here is POSIX-only (PATH split on'
+    + '\n  ":", no PATHEXT) and the never-hang teardown needs POSIX process groups.'
+    + '\n\n  Use WSL, where everything in this package works normally.\n');
+  process.exit(2);
+}
+
+/**
+ * Resolve a member's command to the ABSOLUTE path that will actually be spawned.
+ *
+ * Returns the resolved path, or null if there is nothing runnable.
+ *
+ * The old version answered a different question from the one that mattered. It reported whether SOME
+ * executable of that name existed, searching `~/.local/bin`, `~/.npm-global/bin`, `/usr/local/bin`
+ * and `/opt/homebrew/bin` **before** PATH — then handed the bare name to `spawn`, which searches
+ * PATH and nothing else, in PATH order. So pre-flight could confirm `/opt/homebrew/bin/codex` while
+ * the run executed a different `codex` from earlier in PATH, or confirm one that `spawn` could not
+ * find at all. Pre-flight exists to remove exactly this kind of surprise.
+ *
+ * Now it resolves once and the resolved absolute path is what gets spawned, so the thing checked and
+ * the thing run are the same file by construction. PATH is searched first, in order, because that is
+ * what an ordinary shell would do; the extra directories are a fallback for CLIs installed outside a
+ * login shell's PATH, and using one is reported.
+ */
+function resolveCmd(cmd) {
   const runnable = (f) => {
     // Existence is not enough: a non-executable file at the right path is reported as present and
     // then fails at spawn time, which is exactly the mid-run discovery pre-flight exists to avoid.
     try { fs.accessSync(f, fs.constants.X_OK); return !fs.statSync(f).isDirectory(); } catch { return false; }
   };
-  if (cmd.includes('/')) return runnable(cmd);
-  const dirs = [`${os.homedir()}/.local/bin`, `${os.homedir()}/.npm-global/bin`,
-    '/usr/local/bin', '/opt/homebrew/bin', ...(process.env.PATH ?? '').split(':')];
-  return dirs.some((d) => d && runnable(path.join(d, cmd)));
+  if (cmd.includes('/')) return runnable(cmd) ? path.resolve(cmd) : null;
+  const onPathDirs = (process.env.PATH ?? '').split(':').filter(Boolean);
+  const extra = [`${os.homedir()}/.local/bin`, `${os.homedir()}/.npm-global/bin`,
+    '/usr/local/bin', '/opt/homebrew/bin'];
+  for (const d of [...onPathDirs, ...extra]) {
+    const f = path.join(d, cmd);
+    if (runnable(f)) return f;
+  }
+  return null;
 }
 
 // ── containment, enforced rather than promised ───────────────────────────────
@@ -154,9 +241,11 @@ function onPath(cmd) {
 const allowUncontained = has('allow-uncontained');
 const asked = CFG.members.filter((m) => !only || only.includes(m.id));
 const uncontained = asked.filter((m) => m.contained === false);
-const requested = allowUncontained ? asked : asked.filter((m) => m.contained !== false);
-const members = requested.filter((m) => onPath(m.cmd));
-const absent = requested.filter((m) => !onPath(m.cmd));
+const requested = (allowUncontained ? asked : asked.filter((m) => m.contained !== false))
+  // Resolved once. `resolved` is what ask() spawns, so pre-flight and the run cannot disagree.
+  .map((m) => ({ ...m, resolved: resolveCmd(m.cmd) }));
+const members = requested.filter((m) => m.resolved);
+const absent = requested.filter((m) => !m.resolved);
 
 ev('run_start', {
   schema: SCHEMA,
@@ -169,6 +258,19 @@ ev('preflight', {
   available: members.map((m) => m.id),
   absent: absent.map((m) => ({ id: m.id, label: m.label, cmd: m.cmd })),
 });
+
+if (localRosterIgnored) {
+  log(`\n▸ Ignored \`.council/members.json\` — a repo cannot choose what gets executed.`);
+  log(`    Every field in a roster is a command this script will run, including the \`contained\``);
+  log(`    flag that decides whether a member is allowed to write files. Pass --local-roster to use`);
+  log(`    it; its members are then treated as UNCONTAINED whatever the file says, so`);
+  log(`    --allow-uncontained is required too.`);
+}
+if (usingLocal) {
+  log(`\n▸ ⚠ Using the repo-local roster at \`.council/members.json\` (--local-roster).`);
+  log(`    \`contained\` was stripped from it: containment is something verify-containment.mjs`);
+  log(`    demonstrates, not something a file in the working directory may claim.`);
+}
 
 if (uncontained.length) {
   if (allowUncontained) {
@@ -208,20 +310,8 @@ if (has('preflight')) {
   process.exit(0);
 }
 
-// ── a seeded shuffle, so a run is reproducible but position bias is not shared ────
-const seedNum = (s) => parseInt(crypto.createHash('sha256').update(s).digest('hex').slice(0, 12), 16);
-
-function shuffled(arr, seedStr) {
-  let h = seedNum(seedStr);
-  const a = [...arr];
-  for (let i = a.length - 1; i > 0; i--) {
-    h = (h * 1103515245 + 12345) % 2147483648;
-    const j = h % (i + 1);
-    [a[i], a[j]] = [a[j], a[i]];
-  }
-  return a;
-}
-
+// The seeded shuffle lives in diagnostics.mjs — it was inline and therefore unmeasurable, which
+// is how a generator reaching only 23 of 120 orderings survived. See the comment there.
 // ── the heartbeat ────────────────────────────────────────────────────────────
 //
 // One timer for the whole run rather than one per member: five timers producing five interleaved
@@ -231,6 +321,43 @@ function shuffled(arr, seedStr) {
 // Unref'd, so it can never be the reason node stays alive — the bug this file has a whole section
 // about, reintroduced by the progress indicator, would be a poor trade.
 const live = new Map();          // id → {member, stage, started, bytes, lastLine}
+
+// ── nothing outlives this process ─────────────────────────────────────────────
+//
+// Members are spawned `detached`, in their own process groups, so the timeout can kill a whole tree.
+// The cost of that is a Ctrl-C: the parent dies and the groups do not, leaving four model CLIs
+// running invisibly, still spending, with no terminal attached. `unref` prevents them holding node
+// open; it does nothing to stop them existing.
+//
+// So the interrupt is caught, every live group is killed, and the stream is terminated properly.
+const killAllLive = (sig) => {
+  for (const [, s] of live) {
+    if (!s.pid) continue;
+    try { process.kill(-s.pid, sig); } catch { /* group already gone */ }
+  }
+};
+
+let shuttingDown = false;
+const shutdown = (why, code) => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  killAllLive('SIGTERM');
+  // The stream promises a terminal event. Without this a UI tailing the file waits forever on a run
+  // that ended, which is indistinguishable from the hang this whole design exists to rule out.
+  try { ev('run_error', { message: why }); } catch { /* the stream is already gone */ }
+  try { clearInterval(ticker); emitter.close(); render.finish(); } catch { /* nothing to close */ }
+  setTimeout(() => { killAllLive('SIGKILL'); process.exit(code); }, 300).unref?.();
+};
+
+for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+  process.on(sig, () => {
+    process.stderr.write(`\n  ${sig} — stopping ${live.size} running member(s) so nothing keeps spending.\n`);
+    shutdown(`interrupted by ${sig}`, 130);
+  });
+}
+// An uncaught throw used to end the run with a node stack trace and NO terminal event at all.
+process.on('uncaughtException', (e) => shutdown(`uncaught: ${e?.message ?? e}`, 1));
+process.on('unhandledRejection', (e) => shutdown(`unhandled rejection: ${e?.message ?? e}`, 1));
 const ticker = setInterval(() => {
   for (const [id, s] of live) {
     ev('member_tick', {
@@ -254,12 +381,16 @@ ticker.unref?.();
  * event loop alive after the promise had already resolved — the council finished and the process sat
  * there. SIGKILL follows, and the child is unref'd so node can exit.
  */
-function ask(member, prompt, { stage = '1' } = {}) {
+function ask(member, prompt, { stage = '1', raw = false } = {}) {
   const started = Date.now();
   const timeoutMs = timeoutMin * 60_000;
   const done = (ok, text, extra = {}) => {
     const r = { id: member.id, label: member.label, ok, text: String(text).trim(), ms: Date.now() - started, ...extra };
-    ev('member_done', { stage, id: member.id, label: member.label, ok: r.ok, ms: r.ms, chars: r.text.length, reason: ok ? undefined : r.text.slice(0, 120) });
+    // Redacted. events.mjs promises that `lastLine` is the ONLY field echoing child output, and
+    // this field was quietly breaking that: a failure reason is raw stdout/stderr, which can contain
+    // a fragment of the pack or a credential the CLI printed in a diagnostic.
+    ev('member_done', { stage, id: member.id, label: member.label, ok: r.ok, ms: r.ms,
+      chars: r.text.length, reason: ok ? undefined : redactLine(r.text.split('\n')[0], 160) });
     return r;
   };
 
@@ -272,7 +403,7 @@ function ask(member, prompt, { stage = '1' } = {}) {
 
   return new Promise((resolve) => {
     let out = '', err = '', settled = false;
-    const state = { member, stage, started, bytes: 0, lastLine: '' };
+    const state = { member, stage, started, bytes: 0, lastLine: '', pid: null };
     live.set(member.id, state);
 
     const finish = (ok, text) => {
@@ -292,7 +423,9 @@ function ask(member, prompt, { stage = '1' } = {}) {
       // stdout pipe, so the parent's event loop never drained and the run hung anyway — 15s instead
       // of the 329ms the earlier fix had achieved. Every member here is a CLI that shells out, so
       // this is the normal case rather than an edge one.
-      p = spawn(member.cmd, plan.args, {
+      // The path resolved at pre-flight, never the bare name — otherwise this could execute a
+      // different binary from the one that was checked.
+      p = spawn(member.resolved ?? member.cmd, plan.args, {
         cwd: scratch,
         stdio: [plan.stdin === null ? 'ignore' : 'pipe', 'pipe', 'pipe'],
         detached: true,
@@ -301,6 +434,8 @@ function ask(member, prompt, { stage = '1' } = {}) {
       finish(false, `could not start ${member.cmd}: ${e.message}`);
       return;
     }
+
+    state.pid = p.pid;   // so an interrupt can kill this member's whole group
 
     if (plan.stdin !== null) {
       // EPIPE here means the child exited before reading the prompt — a result, not a crash. The
@@ -321,7 +456,12 @@ function ask(member, prompt, { stage = '1' } = {}) {
     p.stdout.on('error', () => {});          // EPIPE if the child dies mid-write
     p.stderr.on('error', () => {});
     p.on('error', (e) => finish(false, `could not start ${member.cmd}: ${e.message}`));
-    p.on('close', (c) => finish(...judgeOutput(out, err, c)));
+    // `raw` skips the answer heuristics. A canary probe is not an answer — it is 20 characters
+    // that either contain a token or do not — and running it through MIN_ANSWER_CHARS is how
+    // --verify-delivery came to fail every member that complied exactly.
+    p.on('close', (c) => finish(...(raw
+      ? [c === 0 || out.trim().length > 0, out.trim() || (err || '').trim() || `exit ${c}`]
+      : judgeOutput(out, err, c))));
 
     // Kill the whole group (negative pid), falling back to the single process if the group is
     // already gone. SIGTERM is a request; SIGKILL five seconds later is not.
@@ -363,7 +503,7 @@ if (has('verify-delivery')) {
   log(`  A wrong delivery channel does not error — it answers an empty question fluently.\n`);
   const results = await Promise.all(members.map(async (m) => {
     const c = canary();
-    const r = await ask(m, c.prompt, { stage: 'verify' });
+    const r = await ask(m, c.prompt, { stage: 'verify', raw: true });
     return { m, ok: r.ok && c.arrived(r.text), r, via: deliveryOf(m) };
   }));
   log('');
@@ -395,7 +535,7 @@ const brief = loadBrief(ROOT);
 // The budget is shown every run, because the failure at the ceiling is silent: at ~80k one member
 // stopped following instructions rather than erroring. Measured 2026-07-28.
 log(`\n▸ Context — ${ctx.files.length} file(s), ~${(ctxTok / 1000).toFixed(1)}k tokens `
-  + `of ~40k budget${ctxTok > 27_000 ? '  ⚠ past the size every member was verified obedient at' : ''}`);
+  + `of ~40k budget${ctxTok > VERIFIED_OBEDIENT_TOKENS ? `  ⚠ past ~${VERIFIED_OBEDIENT_TOKENS / 1000}k, the largest pack every member was VERIFIED obedient at` : ''}`);
 for (const f of ctx.files) log(`    + ${f}`);
 for (const r of ctx.refused) log(`    ✗ ${r}`);
 if (!ctx.files.length) {
@@ -404,11 +544,13 @@ if (!ctx.files.length) {
 }
 
 if (brief.source) log(`▸ Brief    — ${brief.source}`);
+else if (brief.refused) log(`▸ Brief    — ✗ ${brief.refused}`);
 else log('▸ Brief    — none found. Write .council/BRIEF.md or AGENTS.md; it is the cheapest quality win available.');
 
 ev('context', {
   files: ctx.files, refused: ctx.refused, chars: ctx.chars, tokens: ctxTok,
-  budgetTokens: 40_000, briefSource: brief.source,
+  budgetTokens: 40_000, verifiedObedientTokens: VERIFIED_OBEDIENT_TOKENS,
+  briefSource: brief.source, briefRefused: brief.refused ?? null,
 });
 
 const preamble = [brief.text, ctx.text].filter(Boolean).join('\n\n---\n\n');
@@ -443,7 +585,7 @@ ev('stage_start', { stage: stageLabel, members: members.map((m) => m.id), hint: 
 
 const opinions = await Promise.all(members.map((m) => ask(m,
   rubricMode
-    ? P.rubric(preamble, question, question)
+    ? P.rubric(preamble, question, question, lenses[m.id])
     : P.stage1(preamble, question, lenses[m.id]),
   { stage: stageLabel })));
 
@@ -469,13 +611,30 @@ if (!good.length) {
 let revised = null;
 if (has('revise') && good.length > 1) {
   ev('stage_start', { stage: '1b', members: good.map((o) => o.id), hint: 'revision — each sees the others and answers again' });
-  const board = good.map((o, i) => `### Response ${String.fromCharCode(65 + i)}\n\n${o.text}`).join('\n\n---\n\n');
+
+  // A DISTINCT ordering per member, exactly as stage 2 does.
+  //
+  // This built one board and gave it to everybody, which is precisely the flaw this project
+  // criticises the original for: "his labels responses A,B,C… in a fixed order for everyone, so
+  // position bias points the same way for every reviewer and compounds." Stage 2 was fixed and
+  // stage 1b was not, so the round whose whole purpose is letting members influence each other
+  // applied a shared, invisible tilt to which answer each of them read first.
+  let reviseFailed = 0;
   revised = await Promise.all(good.map(async (o) => {
+    const order = shuffled(good, `1b::${question}::${o.id}`);
+    const board = order.map((x, i) => `### Response ${String.fromCharCode(65 + i)}\n\n${x.text}`).join('\n\n---\n\n');
     const m = members.find((x) => x.id === o.id);
     const r = await ask(m, P.stage1b(preamble, question, board, lenses[o.id]), { stage: '1b' });
-    return r.ok ? r : o;
+    // Falling back to the first answer is right — a council of four beats a council that died — but
+    // it must not be reported as a successful revision. `failed: 0` was hardcoded, and because the
+    // fallback object carries ok:true from stage 1, the success count included every failure.
+    if (!r.ok) { reviseFailed++; return { ...o, revisionFailed: r.text }; }
+    return r;
   }));
-  ev('stage_done', { stage: '1b', ok: revised.filter((o) => o.ok).length, failed: 0 });
+  ev('stage_done', { stage: '1b', ok: revised.length - reviseFailed, failed: reviseFailed });
+  if (reviseFailed) {
+    log(`  ⚠ ${reviseFailed} member(s) failed to revise; their FIRST answer was kept and is marked in the run file.`);
+  }
   good = revised;
 }
 
@@ -560,15 +719,19 @@ const confLine = (id) => {
   return `**${c.confidence}%**${c.changeMind ? ` — would change its mind if: ${c.changeMind}` : ''}`;
 };
 
+const jsonFile = file.replace(/\.md$/, '.json');
+
 const md = [
   `# Council — ${question}`,
   ``,
-  `> ${new Date().toISOString().slice(0, 16).replace('T', ' ')} · ${good.length}/${members.length} answered`
+  `> ${new Date().toISOString().slice(0, 16).replace('T', ' ')} · ${good.length}/${requested.length} answered`
     + `${useLenses ? ' · lensed' : ''}${rubricMode ? ' · rubric' : ''}`,
   ...(ctx.files.length
     ? [`> **Context:** ${ctx.files.map((f) => `\`${f}\``).join(', ')} — ~${ctxTok} tokens`]
     : [`> **No context was passed.** Every answer below is reasoning about code the members could not read.`]),
   ...(ctx.refused.length ? [`> **Refused:** ${ctx.refused.join('; ')}`] : []),
+  ...(brief.refused ? [`> **Brief refused:** ${brief.refused}`] : []),
+  ...(usingLocal ? [`> **⚠ Repo-local roster** (\`--local-roster\`) — \`contained\` was stripped from it.`] : []),
   ...(eventsPath ? [`> **Event stream:** \`${path.relative(ROOT, eventsPath)}\``] : []),
   // Recorded in the file, not only in the terminal. Someone reading this run in three months has to
   // be able to tell whether a member that can write to any path was in the room.
@@ -608,10 +771,10 @@ const md = [
   ...(tally ? [
     `## Aggregate — Borda over ${tally.counted}/${tally.total} rankings, **self-votes excluded**`,
     ``,
-    `| Member | Score | Answer length | Confidence |`,
-    `|---|---|---|---|`,
+    `| Member | Score | Ranked by | Answer length | Confidence |`,
+    `|---|---|---|---|---|`,
     ...Object.entries(tally.scores).sort((a, b) => b[1] - a[1])
-      .map(([id, s]) => `| ${byId[id]} | ${s} | ${tally.lengths[id]} chars | ${confidences[id]?.confidence ?? '—'} |`),
+      .map(([id, s]) => `| ${byId[id]} | ${s.toFixed(2)} | ${tally.ranked?.[id] ?? 0}/${tally.counted} | ${tally.lengths[id]} chars | ${confidences[id]?.confidence ?? '—'} |`),
     ``,
   ] : []),
 
@@ -706,7 +869,11 @@ const md = [
     `the signal** — a member that reversed itself here is worth more attention than one that`,
     `restated its first answer at greater length.`,
     ``,
-    ...revised.flatMap((o) => [`### ${o.label}`, ``, o.text, ``, `---`, ``]),
+    ...revised.flatMap((o) => [
+      `### ${o.label}${o.revisionFailed ? ' — REVISION FAILED, first answer shown' : ''}`, ``,
+      ...(o.revisionFailed ? [`> Could not revise: ${o.revisionFailed.split('\n')[0].slice(0, 120)}`, ``] : []),
+      o.text, ``, `---`, ``,
+    ]),
   ] : []),
   ...(reviews.length ? [
     `## Stage 2 — anonymised peer review`,
@@ -753,18 +920,41 @@ const md = [
   ``,
 ].join('\n');
 
+// A run file must not be written THROUGH a symlink. `.council/runs/<slug>.md` is a predictable
+// path inside the user's repo, and the slug comes from the question, so a repo that ships
+// `.council/runs/is-this-safe.md` as a symlink to `~/.zshrc` would have this overwrite it. Refuse
+// and say so, rather than following it.
+const refuseSymlink = (p) => {
+  try {
+    if (fs.lstatSync(p).isSymbolicLink()) {
+      log(`\n  ⚠ ${path.relative(ROOT, p)} is a symlink. Refusing to write through it —`);
+      log(`    a run file is a predictable path and following a link there would let a repo choose`);
+      log(`    the destination. Delete or rename it and re-run.`);
+      return true;
+    }
+  } catch { /* does not exist yet, which is the normal case */ }
+  return false;
+};
+const blocked = [file, jsonFile].filter(refuseSymlink);
+if (blocked.length) {
+  ev('run_error', { message: `refused to write through a symlink: ${blocked.join(', ')}` });
+  clearInterval(ticker); emitter.close(); render.finish();
+  process.exit(1);
+}
+
 fs.writeFileSync(file, md);
 
 // A structured sibling of the markdown, for anything that is not a human. The markdown is the
 // record; this is the same run in a shape a UI, a diff, or a later measurement can index without
 // parsing prose.
-const jsonFile = file.replace(/\.md$/, '.json');
 fs.writeFileSync(jsonFile, `${JSON.stringify({
   schema: SCHEMA,
   question,
   at: new Date().toISOString(),
   flags: { lenses: useLenses, rubric: rubricMode, revise: has('revise'), stage1Only, timeoutMin },
-  context: { files: ctx.files, refused: ctx.refused, tokens: ctxTok, brief: brief.source },
+  context: { files: ctx.files, refused: ctx.refused, tokens: ctxTok, brief: brief.source,
+    briefRefused: brief.refused ?? null, verifiedObedientTokens: VERIFIED_OBEDIENT_TOKENS },
+  roster: { path: rosterPath, local: usingLocal, localIgnored: localRosterIgnored },
   members: requested.map((m) => ({ id: m.id, label: m.label, family: m.family ?? 'unknown', via: deliveryOf(m), present: members.includes(m) })),
   opinions: opinions.map((o) => ({ id: o.id, ok: o.ok, ms: o.ms, chars: o.text.length, lens: lenses[o.id]?.id ?? null, ...confidences[o.id] })),
   reviews: reviews.map((r) => ({ id: r.id, ok: r.ok, ms: r.ms, parsed: r.parsed, minority: r.minority ?? null, lost: r.lost ?? null })),

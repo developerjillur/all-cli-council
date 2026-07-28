@@ -110,7 +110,15 @@ export function createEmitter({ file = null, toFd = null } = {}) {
       // failed to open the file — with --events treated as fatal, the run refused to start at all.
       // path.dirname returns "." for a bare filename, which is what was meant.
       fs.mkdirSync(path.dirname(file), { recursive: true });
-      fd = fs.openSync(file, 'a');
+
+      // `'w'`, not `'a'`. **One file is one run.**
+      //
+      // Appending was the intuitive choice and it was wrong. A re-run against the same slug produced
+      // a file containing two `run_start` events, two sets of members and two `run_done`s — and
+      // `reduce()` folds them into one incoherent state, because a stream is defined as one run from
+      // start to finish. Truncating also gives a watcher a clean signal: `watch.mjs` sees the file
+      // shrink below its read offset and starts over, which is exactly right for a new run.
+      fd = fs.openSync(file, 'w');
     } catch (e) { broken = e.message; }
   }
 

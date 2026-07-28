@@ -141,8 +141,24 @@ if (!question && !has('verify-delivery')) {
 const scratch = CFG.scratchDir.replace('~', os.homedir());
 fs.mkdirSync(scratch, { recursive: true });
 
-const slug = question.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60)
-  || 'council';
+// ── the run's filename, and why a long question gets a hash on the end ────────
+//
+// The slug was the question, sanitised and cut to 60 characters. Two different questions that agree
+// for their first 60 characters therefore produced the **same** filename — and this was not
+// hypothetical: the two rounds of grading this package differed only in a paragraph appended to the
+// end, so the second round silently overwrote the first round's `.md`, and appended its events to the
+// first round's stream. One stream file ended up containing two `run_start` events, which no consumer
+// is built to expect.
+//
+// A 6-character hash of the FULL question is appended whenever the slug had to be cut. Short
+// questions keep clean, predictable filenames; long ones become distinct. Not applied
+// unconditionally, because a readable filename in `.council/runs/` is most of what makes the
+// directory browsable.
+const SLUG_MAX = 60;
+const bare = question.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+const slug = (bare.length > SLUG_MAX
+  ? `${bare.slice(0, SLUG_MAX).replace(/-$/, '')}-${crypto.createHash('sha256').update(question).digest('hex').slice(0, 6)}`
+  : bare) || 'council';
 
 // ── the event stream, and the live view fed from it ──────────────────────────
 //

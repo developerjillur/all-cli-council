@@ -11,6 +11,7 @@
 //   node tests/council.test.mjs
 
 import { spawnSync } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -897,6 +898,48 @@ console.log('\n▸ The council graded itself at 5.0/10 — these are what it fou
     check('...and the verified-obedient number is exported rather than duplicated as a literal',
       VERIFIED_OBEDIENT_TOKENS === 27_000);
   }
+}
+
+
+// ── one run, one file ────────────────────────────────────────────────────────
+console.log('\n▸ Run files — a long question must not overwrite a different long question');
+{
+  // WAS OPEN, and found by using the tool: the two rounds of grading this package differed only in a
+  // paragraph appended at the end, so their 60-char slugs were identical. Round two silently
+  // overwrote round one's .md and APPENDED to its event stream, producing one file with two
+  // run_start events — a shape no consumer is built to read.
+  const slugOf = (q) => {
+    const SLUG_MAX = 60;
+    const bare = q.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+    return (bare.length > SLUG_MAX
+      ? `${bare.slice(0, SLUG_MAX).replace(/-$/, '')}-${crypto.createHash('sha256').update(q).digest('hex').slice(0, 6)}`
+      : bare) || 'council';
+  };
+  const a = 'Grade this package and find every defect in the orchestration layer, round one';
+  const b = 'Grade this package and find every defect in the orchestration layer, round two';
+  check('two long questions sharing a 60-char prefix get DIFFERENT files', slugOf(a) !== slugOf(b),
+    `${slugOf(a)} vs ${slugOf(b)}`);
+  check('...and each is stable across runs', slugOf(a) === slugOf(a));
+  check('a short question keeps a clean, readable filename', slugOf('Is the retry safe?') === 'is-the-retry-safe',
+    'the runs directory has to stay browsable');
+  check('an empty question still yields a filename', slugOf('!!!') === 'council');
+
+  // The stream is defined as ONE run from run_start to run_done. Appending broke that.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'council-onerun-'));
+  const f = path.join(dir, 'r.events.ndjson');
+  for (const n of [1, 2]) {
+    const em = createEmitter({ file: f });
+    em.emit('run_start', { schema: SCHEMA, question: `run ${n}`, members: [] });
+    em.emit('run_done', { ok: true, answered: n, requested: n, file: 'x', exitCode: 0 });
+    em.close();
+  }
+  const lines = fs.readFileSync(f, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  check('re-running truncates the stream instead of appending a second run',
+    lines.filter((e) => e.ev === 'run_start').length === 1,
+    `${lines.filter((e) => e.ev === 'run_start').length} run_start event(s)`);
+  check('...and the surviving run is the latest one',
+    lines.find((e) => e.ev === 'run_start').question === 'run 2');
+  fs.rmSync(dir, { recursive: true, force: true });
 }
 
 console.log(`\n${'─'.repeat(72)}`);

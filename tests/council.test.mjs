@@ -257,10 +257,27 @@ console.log('\n\u25b8 Convening \u2014 a missing CLI is reported and stepped ove
   const run = (args, ms = 30_000) => spawnSync('node', [cli, ...args],
     { encoding: 'utf8', timeout: ms, cwd: ROOT });
 
-  // Pre-flight spends nothing and answers the question "would this work right now".
+  // Pre-flight spends nothing and answers "would this work right now".
+  //
+  // Made deterministic with a fake member: the first version asserted exit 0, which is right on
+  // a developer machine and WRONG on a CI runner, where no member CLI is installed and exit 2
+  // is the correct answer. CI caught it on its very first run — the test was machine-dependent,
+  // not the code.
+  const fakeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'council-fake-'));
+  const fakeCli = path.join(fakeDir, 'fake-member');
+  fs.writeFileSync(fakeCli, '#!/bin/sh\necho "an answer long enough to count as one"\n');
+  fs.chmodSync(fakeCli, 0o755);
+  const cfg0 = JSON.parse(original);
+  fs.writeFileSync(roster, JSON.stringify({
+    ...cfg0,
+    members: [{ id: 'fake', label: 'Fake', cmd: fakeCli, args: ['{prompt}'], verified: 'fixture' }],
+  }, null, 2));
+
   const pre = run(['anything', '--preflight']);
-  check('--preflight exits 0 without running a council', pre.status === 0);
+  check('--preflight exits 0 when a member exists', pre.status === 0, `exit ${pre.status}`);
   check('...and names who is available', /member\(s\) available/.test(pre.stderr ?? ''));
+  fs.rmSync(fakeDir, { recursive: true, force: true });
+  fs.writeFileSync(roster, original);
 
   // WAS THE RISK: discovering mid-run, after other members had already started.
   const cfg = JSON.parse(original);

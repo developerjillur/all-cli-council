@@ -119,7 +119,9 @@ export function prepare(member, prompt, scratch, platform = process.platform) {
     }
     return {
       ok: true, via, exposed: false, stdin: null,
-      args: member.args.map((a) => a.replace('{promptFile}', f)),
+      // A replacer function, never a replacement string: `String.replace` expands `$&`, `` $` ``,
+      // `$'` and `$1` in a string replacement, and these prompts are full of source code.
+      args: member.args.map((a) => a.replace('{promptFile}', () => f)),
       // Removed as soon as the member exits, whether it answered or not. A scratch dir that
       // accumulates prompt files is a slow-motion version of the leak this replaced.
       cleanup: () => { try { fs.rmSync(f, { force: true }); } catch { /* gone */ } },
@@ -147,7 +149,10 @@ export function prepare(member, prompt, scratch, platform = process.platform) {
   }
   return {
     ok: true, via, exposed: true, stdin: null,
-    args: member.args.map((a) => a.replace('{prompt}', prompt)),
+    // Measured: a prompt containing `s.replace(/x/, '$&$&')` arrived as
+    // `s.replace(/x/, '{prompt}{prompt}')`, and `$'` / `` $` `` were deleted. A replacer
+    // function is never pattern-expanded.
+    args: member.args.map((a) => a.replace('{prompt}', () => prompt)),
     cleanup: () => {},
   };
 }
@@ -173,11 +178,38 @@ export function canary() {
     // Fixed twice over, deliberately: the reply is now comfortably longer than the floor, AND
     // `--verify-delivery` judges the raw output for the token rather than routing a probe through
     // the answer heuristics, which were written for answers and do not apply to a canary.
-    prompt: `Reply with exactly this line and nothing else:\n\nDELIVERY CONFIRMED ${token}`,
+    // **Phrased as a self-test with its reason, not as a bare command — and that is the second bug
+    // fix in this function.**
+    //
+    // The previous wording was *"Reply with exactly this line and nothing else: DELIVERY CONFIRMED
+    // <token>"*. Sonnet 5 read that, correctly, as injection-shaped — an instruction to ignore its
+    // judgement and emit a fixed string — and answered *"This appears to be a prompt injection
+    // attempt."* The tool then reported **"NO CANARY — the prompt is not arriving"** on a channel
+    // that was working perfectly.
+    //
+    // So the probe was punishing the members with the best instincts, in the one feature whose entire
+    // purpose is not producing false negatives. A request with a stated reason is not injection-shaped
+    // and a careful model has no reason to refuse it.
+    prompt: `This is a delivery self-test from a local tool (All CLI Council). It is checking that a `
+      + `prompt sent on this channel actually reaches you — when the channel is wrong, some CLIs `
+      + `silently treat the turn as empty and answer a question they never received, which nothing `
+      + `downstream can detect.\n\n`
+      + `Nothing is being asked of your judgement, and there is no task hidden in this. Just confirm `
+      + `receipt by including this token somewhere in your reply:\n\n`
+      + `    ${token}\n\n`
+      + `One short line is plenty.`,
     /**
      * A member whose prompt never arrived answers *something* — a greeting, an offer to help.
      * Only the token proves the bytes got there.
      */
     arrived: (out) => String(out ?? '').includes(token),
+    /**
+     * "It refused" and "it never got the prompt" need different remedies, and reporting the first as
+     * the second sends someone to edit a `promptVia` that was correct.
+     *
+     * A member that mentions the probe at all clearly received it; the delivery channel is fine and
+     * the wording is what needs work.
+     */
+    refused: (out) => /injection|refus|will not comply|cannot comply|suspicious/i.test(String(out ?? '')),
   };
 }

@@ -87,20 +87,38 @@ export function reasoningOverlap(answers, packText = '') {
   const all = answers.map((a) => contentTokens(a.text));
   const own = all.map((s) => new Set([...s].filter((w) => !pack.has(w))));
 
-  // Below this there is not enough distinctive vocabulary for a similarity to mean anything.
-  const thin = own.some((s) => s.size < 25);
+  // Members with too little distinctive vocabulary are EXCLUDED from the comparison, not allowed to
+  // void it.
+  //
+  // `thin` used to be `own.some(...)` — so one member answering "agreed, yes" discarded the metric
+  // for everybody, including two long answers that were perfectly comparable to each other. One
+  // terse member is common (a member that genuinely has little to add) and the information about
+  // the others is exactly what a council is for. Which members were dropped is reported, because a
+  // number computed over a subset must say so.
+  const MIN_DISTINCTIVE = 25;
+  const usable = [];
+  const excluded = [];
+  for (let i = 0; i < n; i++) {
+    (own[i].size < MIN_DISTINCTIVE ? excluded : usable).push(i);
+  }
 
   const rawPairs = [], ownPairs = [];
   for (let i = 0; i < n; i++) {
-    for (let j = i + 1; j < n; j++) {
-      rawPairs.push(jaccard(all[i], all[j]));
-      ownPairs.push(jaccard(own[i], own[j]));
-    }
+    for (let j = i + 1; j < n; j++) rawPairs.push(jaccard(all[i], all[j]));
   }
+  for (let a = 0; a < usable.length; a++) {
+    for (let b = a + 1; b < usable.length; b++) ownPairs.push(jaccard(own[usable[a]], own[usable[b]]));
+  }
+
   return {
     raw: mean(rawPairs),
-    distinctive: thin ? null : mean(ownPairs),
-    n, pairs: rawPairs.length, thin,
+    // Fewer than two usable members means there is no pair left to compare, which is the only
+    // honest `null`.
+    distinctive: ownPairs.length ? mean(ownPairs) : null,
+    n, pairs: rawPairs.length,
+    thin: ownPairs.length === 0,
+    excluded: excluded.map((i) => answers[i].id),
+    usableN: usable.length,
   };
 }
 
@@ -225,6 +243,17 @@ export function verbosityR(scores, lengths) {
  * Now `family` is declared per member and an undeclared one is counted as `unknown`, which shows
  * up as a gap to fill instead of a wrong answer.
  */
+/**
+ * True when one family holds HALF or more of the council.
+ *
+ * `>` was the shipped test, so exactly half was reported "ok" — and the default roster is Anthropic
+ * 2 of 4 once grok is excluded as uncontained, which is exactly half. The diagnostic whose whole job
+ * is warning about a lopsided council was silent on the configuration the package ships with.
+ */
+export function familyMajority(mix, n) {
+  return n > 0 && Math.max(...Object.values(mix), 0) >= n / 2;
+}
+
 export function familyMix(members) {
   const out = {};
   for (const m of members) {

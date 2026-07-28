@@ -54,7 +54,7 @@ import { createEmitter, redactLine, SCHEMA } from './events.mjs';
 import { createRenderer } from './render.mjs';
 import { prepare, deliveryOf, canary, argvCeiling } from './prompt-delivery.mjs';
 import { borda, verbosityR, familyMix, reasoningOverlap, parseConfidence, parseRubric,
-  aggregateScores, rankedLabels, shuffled, seedNum, OVERLAP_SUSPECT } from './diagnostics.mjs';
+  aggregateScores, rankedLabels, shuffled, seedNum, familyMajority, OVERLAP_SUSPECT } from './diagnostics.mjs';
 import * as P from './prompts.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -123,6 +123,18 @@ for (let i = 0; i < argv.length; i++) {
     while (argv[i + 1] && !argv[i + 1].startsWith('--')) ctxFiles.push(argv[++i]);
   }
 }
+// `=`-style flags given with a SPACE used to have their value swallowed into the question:
+// `--members codex` produced a member filter of undefined and a question ending in "codex". Silent,
+// and it changes both the roster and the question at once. Refused with the correct form instead.
+const EQ_FLAGS = ['members', 'timeout', 'events'];
+const spaceForm = argv.findIndex((a, i) => EQ_FLAGS.includes(a.replace(/^--/, ''))
+  && a.startsWith('--') && argv[i + 1] && !argv[i + 1].startsWith('--'));
+if (spaceForm >= 0) {
+  console.error(`\n  ${argv[spaceForm]} takes its value with an "=": ${argv[spaceForm]}=${argv[spaceForm + 1]}`);
+  console.error(`  Given with a space, the value would be swallowed into the question instead.\n`);
+  process.exit(1);
+}
+
 const question = argv.filter((a) => !a.startsWith('--') && !ctxFiles.includes(a)).join(' ').trim();
 const stage1Only = has('stage1-only');
 const useLenses = has('lenses');
@@ -138,8 +150,21 @@ if (!question && !has('verify-delivery')) {
   process.exit(1);
 }
 
-const scratch = CFG.scratchDir.replace('~', os.homedir());
-fs.mkdirSync(scratch, { recursive: true });
+// A roster missing `scratchDir` used to crash here with `Cannot read properties of undefined`,
+// before any handler was installed — a raw node stack trace instead of the named, actionable refusal
+// every other bad-roster case gets. It defaults instead, because a scratch directory is an
+// implementation detail rather than a decision a roster has to make.
+const scratch = String(CFG.scratchDir ?? '~/.nexa-council-scratch').replace('~', os.homedir());
+if (!path.isAbsolute(scratch)) {
+  console.error(`\n  The roster's scratchDir must be absolute (or start with ~). Got: ${CFG.scratchDir}\n`);
+  process.exit(2);
+}
+try {
+  fs.mkdirSync(scratch, { recursive: true });
+} catch (e) {
+  console.error(`\n  Could not create the scratch directory ${scratch}: ${e.message}\n`);
+  process.exit(2);
+}
 
 // ── the run's filename, and why a long question gets a hash on the end ────────
 //
@@ -168,6 +193,19 @@ const slug = (bare.length > SLUG_MAX
 const eventsPath = has('events')
   ? (flag('events') || path.join(OUT_DIR, `${slug}.events.ndjson`))
   : null;
+// **Checked BEFORE the emitter opens.** The earlier symlink guard sat next to the markdown write, so
+// the event stream — opened at startup and written to for the entire run — was the one output nothing
+// checked, and the guard's own class of bug was reintroduced by the fix for it. Three of four judges
+// found this independently, which is what moved the check into `safe-write.mjs` and put every write
+// through it instead of adding a third patch.
+if (eventsPath) {
+  const w = checkWritable(eventsPath, ROOT);
+  if (!w.ok) {
+    console.error(`\n  Refusing to open the event stream: ${w.reason}\n`);
+    process.exit(1);
+  }
+}
+
 const emitter = createEmitter({
   file: eventsPath,
   // fd 3 for a parent that wants the stream without a file. stderr is the human's, stdout is the
@@ -225,7 +263,8 @@ if (process.platform === 'win32') {
  * Now it resolves once and the resolved absolute path is what gets spawned, so the thing checked and
  * the thing run are the same file by construction. PATH is searched first, in order, because that is
  * what an ordinary shell would do; the extra directories are a fallback for CLIs installed outside a
- * login shell's PATH, and using one is reported.
+ * login shell's PATH, and **using one is reported at pre-flight** — the doc comment claimed that
+ * before any code did it, which is its own small dishonesty.
  */
 function resolveCmd(cmd) {
   const runnable = (f) => {
@@ -237,9 +276,15 @@ function resolveCmd(cmd) {
   const onPathDirs = (process.env.PATH ?? '').split(':').filter(Boolean);
   const extra = [`${os.homedir()}/.local/bin`, `${os.homedir()}/.npm-global/bin`,
     '/usr/local/bin', '/opt/homebrew/bin'];
-  for (const d of [...onPathDirs, ...extra]) {
+  for (const d of onPathDirs) {
     const f = path.join(d, cmd);
     if (runnable(f)) return f;
+  }
+  for (const d of extra) {
+    const f = path.join(d, cmd);
+    // Found outside PATH. Reported, because it means `cmd` alone would not have worked in a shell —
+    // useful to know before blaming the council for a CLI the user thinks is installed.
+    if (runnable(f)) return { path: f, offPath: d };
   }
   return null;
 }
@@ -256,10 +301,18 @@ function resolveCmd(cmd) {
 // decision for the user to make out loud, not one for this script to make on their behalf.
 const allowUncontained = has('allow-uncontained');
 const asked = CFG.members.filter((m) => !only || only.includes(m.id));
-const uncontained = asked.filter((m) => m.contained === false);
-const requested = (allowUncontained ? asked : asked.filter((m) => m.contained !== false))
+// Anything not positively verified, not only an explicit `false`.
+const uncontained = asked.filter((m) => m.contained !== true);
+// **Fails CLOSED on an undefined `contained`.** `m.contained !== false` treated a member with no
+// such field as contained, so any roster that simply omitted it — a hand-written one, an older
+// packaged one, a future member added without running the verifier — was silently trusted. The
+// verifier writes the field; its absence means nobody has checked, which is not the same as safe.
+const requested = (allowUncontained ? asked : asked.filter((m) => m.contained === true))
   // Resolved once. `resolved` is what ask() spawns, so pre-flight and the run cannot disagree.
-  .map((m) => ({ ...m, resolved: resolveCmd(m.cmd) }));
+  .map((m) => {
+    const r = resolveCmd(m.cmd);
+    return typeof r === 'object' && r ? { ...m, resolved: r.path, offPath: r.offPath } : { ...m, resolved: r };
+  });
 const members = requested.filter((m) => m.resolved);
 const absent = requested.filter((m) => !m.resolved);
 
@@ -346,6 +399,15 @@ const live = new Map();          // id → {member, stage, started, bytes, lastL
 // open; it does nothing to stop them existing.
 //
 // So the interrupt is caught, every live group is killed, and the stream is terminated properly.
+// Every prompt file currently on disk. A `file`-delivery member's prompt IS the whole context pack,
+// 0600 in the scratch dir. ask() removes its own the moment the member exits; this set covers the
+// path where the process dies before that happens, which is precisely when it matters.
+const promptFiles = new Set();
+const cleanupPromptFiles = () => {
+  for (const f of promptFiles) { try { fs.rmSync(f, { force: true }); } catch { /* gone */ } }
+  promptFiles.clear();
+};
+
 const killAllLive = (sig) => {
   for (const [, s] of live) {
     if (!s.pid) continue;
@@ -362,7 +424,15 @@ const shutdown = (why, code) => {
   // that ended, which is indistinguishable from the hang this whole design exists to rule out.
   try { ev('run_error', { message: why }); } catch { /* the stream is already gone */ }
   try { clearInterval(ticker); emitter.close(); render.finish(); } catch { /* nothing to close */ }
-  setTimeout(() => { killAllLive('SIGKILL'); process.exit(code); }, 300).unref?.();
+  // **Set FIRST, and the backstop timer is deliberately NOT unref'd.**
+  //
+  // Measured: an `unref`'d timer does not hold the event loop open, so with nothing else pending node
+  // exited normally — code **0** — before the SIGKILL sweep and the `process.exit(code)` inside it
+  // ever ran. A council that died of an uncaught error reported success to whatever wrapped it, which
+  // is the single thing a caller relies on. Probed with a script that scheduled an unref'd `exit(7)`
+  // and observed the process exit 0.
+  process.exitCode = code;
+  setTimeout(() => { killAllLive('SIGKILL'); cleanupPromptFiles(); process.exit(code); }, 300);
 };
 
 for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
@@ -411,6 +481,9 @@ function ask(member, prompt, { stage = '1', raw = false } = {}) {
   };
 
   const plan = prepare(member, prompt, scratch);
+  // Tracked for the interrupt path: this file contains the entire context pack.
+  const promptFile = plan.ok ? plan.args.find((a) => a.startsWith(scratch)) : null;
+  if (promptFile) promptFiles.add(promptFile);
   ev('member_start', { stage, id: member.id, label: member.label, promptChars: prompt.length, via: plan.via });
 
   // A member that cannot be handed this prompt is reported like any other failure. Named, with the
@@ -427,6 +500,7 @@ function ask(member, prompt, { stage = '1', raw = false } = {}) {
       settled = true;
       live.delete(member.id);
       plan.cleanup();
+      if (promptFile) promptFiles.delete(promptFile);
       resolve(done(ok, text));
     };
 
@@ -441,7 +515,12 @@ function ask(member, prompt, { stage = '1', raw = false } = {}) {
       // this is the normal case rather than an edge one.
       // The path resolved at pre-flight, never the bare name — otherwise this could execute a
       // different binary from the one that was checked.
-      p = spawn(member.resolved ?? member.cmd, plan.args, {
+      // A member whose own CLI has a self-timeout must not abort BEFORE ours. `agy` defaults to 5m
+      // and was pinned to 14m in the roster — correct for the default --timeout of 15, and silently
+      // wrong for any other value: --timeout=30 gave a member that still quit at 14 minutes and was
+      // reported as a plain failure. `{timeoutMin}` is substituted so the two cannot drift.
+      const finalArgs = plan.args.map((a) => a.replace('{timeoutMin}', () => String(Math.max(1, timeoutMin - 1))));
+      p = spawn(member.resolved ?? member.cmd, finalArgs, {
         cwd: scratch,
         stdio: [plan.stdin === null ? 'ignore' : 'pipe', 'pipe', 'pipe'],
         detached: true,
@@ -520,20 +599,33 @@ if (has('verify-delivery')) {
   const results = await Promise.all(members.map(async (m) => {
     const c = canary();
     const r = await ask(m, c.prompt, { stage: 'verify', raw: true });
-    return { m, ok: r.ok && c.arrived(r.text), r, via: deliveryOf(m) };
+    // Three outcomes, not two. A member that REFUSED the probe plainly received it, and reporting
+    // that as "the prompt is not arriving" sends someone to edit a promptVia that was correct.
+    const arrived = r.ok && c.arrived(r.text);
+    const refused = !arrived && r.ok && c.refused(r.text);
+    return { m, ok: arrived, refused, r, via: deliveryOf(m) };
   }));
   log('');
-  for (const { m, ok, r, via } of results) {
-    log(`  ${ok ? '✅' : '❌'} ${m.label.padEnd(30)} via ${via.padEnd(6)} ${ok ? 'canary returned' : `NO CANARY — "${r.text.slice(0, 60)}"`}`);
+  for (const { m, ok, refused, r, via } of results) {
+    const verdict = ok ? 'canary returned'
+      : refused ? `declined the probe (so it DID receive it) — "${redactLine(r.text, 50)}"`
+      : `NO CANARY — "${redactLine(r.text, 60)}"`;
+    log(`  ${ok ? '✅' : refused ? '➖' : '❌'} ${m.label.padEnd(30)} via ${via.padEnd(6)} ${verdict}`);
   }
-  const bad = results.filter((x) => !x.ok);
+  const bad = results.filter((x) => !x.ok && !x.refused);
+  const declined = results.filter((x) => x.refused);
+  if (declined.length) {
+    log(`\n  ${declined.length} member(s) declined the probe rather than failing it. Their delivery channel`);
+    log(`  is FINE — the token would not have come back at all otherwise. Nothing to fix in the roster.`);
+  }
   if (bad.length) {
-    log(`\n  ${bad.length} member(s) did not return the canary. Their prompt is not arriving —`);
-    log(`  fix promptVia in the roster before trusting anything they say.\n`);
+    log(`\n  ${bad.length} member(s) did not return the canary and did not decline it. Their prompt is`);
+    log(`  not arriving — fix promptVia in the roster before trusting anything they say.\n`);
   } else {
     log(`\n  All ${results.length} receive their prompt.\n`);
   }
-  ev('run_done', { ok: !bad.length, answered: results.length - bad.length, requested: results.length, file: null, exitCode: bad.length ? 1 : 0 });
+  ev('run_done', { ok: !bad.length, answered: results.length - bad.length, requested: results.length,
+    file: null, exitCode: bad.length ? 1 : 0, declined: declined.map((x) => x.m.id) });
   emitter.close(); render.finish();
   process.exit(bad.length ? 1 : 0);
 }
@@ -660,6 +752,7 @@ if (has('revise') && good.length > 1) {
 // catch this file drifting away from it.
 let reviews = [];
 let tally = null;
+let warnedStage2 = false;
 
 // Rubric mode aggregates scores rather than rankings, so peer review is off unless asked for: a
 // ranking of five reviews answers "which review was best", which is not the question a rubric run
@@ -677,7 +770,18 @@ if (wantPeerReview) {
     const mine = letters[order.findIndex((x) => x.id === o.id)];
     const body = order.map((x, i) => `### Response ${letters[i]}\n\n${x.text}`).join('\n\n---\n\n');
 
-    const r = await ask(members.find((m) => m.id === o.id), P.stage2(preamble, question, body), { stage: '2' });
+    const prompt2 = P.stage2(preamble, question, body);
+    // The pre-run warning only ever measured the stage-1 pack, and stage 2 is categorically the
+    // largest prompt of the run: the same preamble PLUS every member's full answer. So the one stage
+    // most likely to cross the instruction-following ceiling was the one nothing checked.
+    const tok2 = Math.round(prompt2.length / 4);
+    if (tok2 > VERIFIED_OBEDIENT_TOKENS && !warnedStage2) {
+      warnedStage2 = true;
+      log(`  ⚠ the stage-2 prompt is ~${(tok2 / 1000).toFixed(1)}k tokens — past the ~${VERIFIED_OBEDIENT_TOKENS / 1000}k every`);
+      log(`    member was verified obedient at. A reviewer that stops following the format here shows`);
+      log(`    up as a missing FINAL RANKING block, not as an error.`);
+    }
+    const r = await ask(members.find((m) => m.id === o.id), prompt2, { stage: '2' });
 
     // Map this reviewer's letters back to member ids before the permutation is forgotten. A label
     // that was never offered to this reviewer is dropped here rather than in the parser — the
@@ -687,8 +791,11 @@ if (wantPeerReview) {
       .map((L) => order[letters.indexOf(L)]?.id)
       .filter(Boolean);
 
-    const minority = r.text.match(/^[^\S\n]*MINORITY VIEW WORTH KEEPING:\s*(.+)$/im)?.[1]?.trim();
-    const lost = r.text.match(/^[^\S\n]*WHAT IS LOST IF THE TOP ANSWER WINS:\s*(.+)$/im)?.[1]?.trim();
+    // Only from a review that actually succeeded. `r.text` on a failure is an error message or a
+    // quota notice, and harvesting a "minority view" out of that put a CLI's diagnostic into the
+    // section a chairman is told to weigh most carefully.
+    const minority = r.ok ? r.text.match(/^[^\S\n]*MINORITY VIEW WORTH KEEPING:\s*(.+)$/im)?.[1]?.trim() : null;
+    const lost = r.ok ? r.text.match(/^[^\S\n]*WHAT IS LOST IF THE TOP ANSWER WINS:\s*(.+)$/im)?.[1]?.trim() : null;
 
     return { ...r, mine, order: order.map((x) => x.id), parsed, minority, lost };
   }));
@@ -803,7 +910,7 @@ const md = [
     `| **Self-enhancement** — judges ranking their own answer 1st | ${tally.selfN ? `${tally.selfFirst}/${tally.selfN} (${Math.round(100 * tally.selfFirst / tally.selfN)}%)` : 'n/a'} | ${Math.round(100 / good.length)}% | ${tally.selfN && tally.selfFirst / tally.selfN > 1.5 / good.length ? '⚠ present' : 'ok'} |`,
     `| **Mean self-rank** | ${tally.selfMean ? tally.selfMean.toFixed(1) : 'n/a'} | ${((good.length + 1) / 2).toFixed(1)} | |`,
     `| **Verbosity** — correlation(score, answer length) | ${tally.lengthR.toFixed(2)} | 0.00 | ${Math.abs(tally.lengthR) > 0.5 ? '⚠ length is doing work' : 'ok'} |`,
-    `| **Family mix** | ${Object.entries(tally.families).map(([f, n]) => `${f} ${n}`).join(', ')} | even | ${Math.max(...Object.values(tally.families)) > good.length / 2 ? '⚠ one family has a majority' : 'ok'} |`,
+    `| **Family mix** | ${Object.entries(tally.families).map(([f, n]) => `${f} ${n}`).join(', ')} | even | ${familyMajority(tally.families, good.length) ? '⚠ one family holds half or more' : 'ok'} |`,
   ] : [
     `| **Family mix** | ${Object.entries(familyMix(good.map((o) => members.find((m) => m.id === o.id) ?? { family: 'unknown' }))).map(([f, n]) => `${f} ${n}`).join(', ')} | even | |`,
   ]),
@@ -876,7 +983,9 @@ const md = [
   ...opinions.flatMap((o) => [
     `### ${o.label}${o.ok ? '' : ' — FAILED'}${useLenses && lenses[o.id] ? ` · ${lenses[o.id].name}` : ''}`, ``,
     `*${Math.round(o.ms / 1000)}s · confidence ${o.ok ? confLine(o.id) : 'n/a'}*`, ``,
-    o.ok ? o.text : `> ${o.text}`, ``, `---`, ``,
+    // Redacted here too. The event stream's failure reason was fixed and this was not, so the
+    // durable file kept the unredacted copy — the worse of the two places for it to live.
+    o.ok ? o.text : `> ${redactLine(o.text.split('\n')[0], 300)}`, ``, `---`, ``,
   ]),
   ...(revised ? [
     `## Stage 1b — after seeing each other`,
@@ -915,7 +1024,7 @@ const md = [
       ``,
       `*saw itself as ${r.mine} · order: ${r.order.map((id, i) => `${String.fromCharCode(65 + i)}=${byId[id] ?? id}`).join(', ')}*`,
       ...(r.ok && r.parsed.length < 2 ? [``, `> ⚠ No parseable \`FINAL RANKING:\` block — excluded from the tally.`] : []),
-      ``, r.ok ? r.text : `> ${r.text}`, ``, `---`, ``,
+      ``, r.ok ? r.text : `> ${redactLine(r.text.split('\n')[0], 300)}`, ``, `---`, ``,
     ]),
   ] : []),
   `## For the chairman`,
@@ -936,34 +1045,22 @@ const md = [
   ``,
 ].join('\n');
 
-// A run file must not be written THROUGH a symlink. `.council/runs/<slug>.md` is a predictable
-// path inside the user's repo, and the slug comes from the question, so a repo that ships
-// `.council/runs/is-this-safe.md` as a symlink to `~/.zshrc` would have this overwrite it. Refuse
-// and say so, rather than following it.
-const refuseSymlink = (p) => {
-  try {
-    if (fs.lstatSync(p).isSymbolicLink()) {
-      log(`\n  ⚠ ${path.relative(ROOT, p)} is a symlink. Refusing to write through it —`);
-      log(`    a run file is a predictable path and following a link there would let a repo choose`);
-      log(`    the destination. Delete or rename it and re-run.`);
-      return true;
-    }
-  } catch { /* does not exist yet, which is the normal case */ }
-  return false;
-};
-const blocked = [file, jsonFile].filter(refuseSymlink);
-if (blocked.length) {
-  ev('run_error', { message: `refused to write through a symlink: ${blocked.join(', ')}` });
+// Both run files go through the one boundary in safe-write.mjs, which refuses a symlinked leaf AND a
+// destination directory that resolves outside the workspace. The per-site `lstat` this replaces
+// checked only the leaf, so a symlinked `.council/runs/` redirected every file in it while each
+// individual check came back clean — the leaves did not exist yet.
+const written = safeWrite(file, md, ROOT);
+if (!written.ok) {
+  log(`\n  ⚠ ${written.reason}`);
+  ev('run_error', { message: written.reason });
   clearInterval(ticker); emitter.close(); render.finish();
   process.exit(1);
 }
 
-fs.writeFileSync(file, md);
-
 // A structured sibling of the markdown, for anything that is not a human. The markdown is the
 // record; this is the same run in a shape a UI, a diff, or a later measurement can index without
 // parsing prose.
-fs.writeFileSync(jsonFile, `${JSON.stringify({
+const jsonWritten = safeWrite(jsonFile, `${JSON.stringify({
   schema: SCHEMA,
   question,
   at: new Date().toISOString(),
@@ -975,7 +1072,8 @@ fs.writeFileSync(jsonFile, `${JSON.stringify({
   opinions: opinions.map((o) => ({ id: o.id, ok: o.ok, ms: o.ms, chars: o.text.length, lens: lenses[o.id]?.id ?? null, ...confidences[o.id] })),
   reviews: reviews.map((r) => ({ id: r.id, ok: r.ok, ms: r.ms, parsed: r.parsed, minority: r.minority ?? null, lost: r.lost ?? null })),
   tally, overlap, rubric: rubricAgg, rubricPerJudge,
-}, null, 2)}\n`);
+}, null, 2)}\n`, ROOT);
+if (!jsonWritten.ok) log(`\n  ⚠ the JSON sibling was not written: ${jsonWritten.reason}`);
 
 // ── the report the caller actually needs ─────────────────────────────────────
 //

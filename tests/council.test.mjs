@@ -21,7 +21,8 @@ import { createEmitter, reduce, redactLine, SCHEMA } from '../scripts/events.mjs
 import { createRenderer } from '../scripts/render.mjs';
 import { up, clearBelow } from '../scripts/ansi.mjs';
 import { prepare, deliveryOf, canary, argvCeiling } from '../scripts/prompt-delivery.mjs';
-import { rankedLabels, borda, familyMix, reasoningOverlap, parseConfidence, parseRubric,
+import { checkWritable, safeWrite } from '../scripts/safe-write.mjs';
+import { rankedLabels, borda, familyMix, familyMajority, reasoningOverlap, parseConfidence, parseRubric,
   aggregateScores, shuffled } from '../scripts/diagnostics.mjs';
 import { assignLenses, LENSES, stage1, stage2, rubric, RUBRIC_DIMENSIONS } from '../scripts/prompts.mjs';
 import { judgeOutput, MIN_ANSWER_CHARS } from '../scripts/judge-output.mjs';
@@ -240,7 +241,9 @@ console.log('\n\u25b8 Convening \u2014 a missing CLI is reported and stepped ove
   const cfg0 = JSON.parse(original);
   fs.writeFileSync(roster, JSON.stringify({
     ...cfg0,
-    members: [{ id: 'fake', label: 'Fake', cmd: fakeCli, args: ['{prompt}'], verified: 'fixture' }],
+    // `contained: true` is now REQUIRED, not assumed. A roster that omits the field means nobody has
+    // run the verifier, which is not the same as safe — so an undeclared member is excluded.
+    members: [{ id: 'fake', label: 'Fake', cmd: fakeCli, args: ['{prompt}'], verified: 'fixture', contained: true }],
   }, null, 2));
 
   const pre = run(['anything', '--preflight']);
@@ -253,7 +256,7 @@ console.log('\n\u25b8 Convening \u2014 a missing CLI is reported and stepped ove
   const cfg = JSON.parse(original);
   fs.writeFileSync(roster, JSON.stringify({
     ...cfg,
-    members: [...cfg.members, { id: 'ghost', label: 'Ghost', cmd: 'definitely-not-installed-xyz', args: ['{prompt}'], verified: 'fixture' }],
+    members: [...cfg.members, { id: 'ghost', label: 'Ghost', cmd: 'definitely-not-installed-xyz', args: ['{prompt}'], verified: 'fixture', contained: true }],
   }, null, 2));
   const ghost = run(['anything', '--preflight']);
   check('an uninstalled member is named before anything runs', /not installed/i.test(ghost.stderr ?? ''));
@@ -886,7 +889,8 @@ console.log('\n▸ The council graded itself at 5.0/10 — these are what it fou
     check('a fatal error still terminates the event stream',
       /uncaughtException/.test(src) && /run_error/.test(src),
       'a UI tailing the file waited forever on a run that had died');
-    check('the run file refuses to write through a symlink', /isSymbolicLink/.test(src));
+    check('the run file goes through the safe-write boundary', /safeWrite\(file, md, ROOT\)/.test(src),
+    'the inline lstat it replaced checked only the leaf, and missed the events stream entirely');
   }
 
   // WAS A FALSE CLAIM: context.mjs said the ceiling was "set where all four were still obedient,
@@ -940,6 +944,220 @@ console.log('\n▸ Run files — a long question must not overwrite a different 
   check('...and the surviving run is the latest one',
     lines.find((e) => e.ev === 'run_start').question === 'run 2');
   fs.rmSync(dir, { recursive: true, force: true });
+}
+
+
+// ── round two: 6.5/10, and three judges found the same hole ──────────────────
+console.log('\n▸ Round two — the council scored 6.5/10 and named these');
+{
+  // WAS OPEN, and found by THREE OF FOUR judges independently — which is what moved the check into
+  // one module. The previous fix guarded the .md and .json with an lstat at each call site. The
+  // --events stream is a third call site, opened at STARTUP and written to for the whole run, and it
+  // was never checked at all: the fix for a class of bug reintroduced that class.
+  //
+  // The per-site lstat was also too shallow. It asked "is this leaf a symlink", not "does this path
+  // resolve inside the workspace" — so a symlinked `.council/runs/` redirected every file in it while
+  // each leaf check came back clean, because the leaves did not exist yet.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'council-sw-'));
+  try {
+    fs.mkdirSync(path.join(root, '.council'));
+    fs.symlinkSync(os.tmpdir(), path.join(root, '.council', 'runs'));
+    const viaParent = checkWritable(path.join(root, '.council', 'runs', 'x.md'), root);
+    check('a symlinked PARENT directory is refused', viaParent.ok === false,
+      'the leaf does not exist yet, so an lstat on it came back clean');
+    check('...and the reason names what resolved where', /resolves to/.test(viaParent.reason ?? ''));
+
+    fs.writeFileSync(path.join(root, 'target.txt'), 'x');
+    fs.mkdirSync(path.join(root, 'r2'));
+    fs.symlinkSync(path.join(os.tmpdir(), 'nonexistent-target'), path.join(root, 'r2', 'leaf.md'));
+    check('a symlinked leaf is refused, even when dangling',
+      checkWritable(path.join(root, 'r2', 'leaf.md'), root).ok === false);
+
+    // A guard that never allows is an outage.
+    check('an ordinary path inside the workspace is allowed',
+      checkWritable(path.join(root, 'r2', 'ordinary.md'), root).ok === true);
+    const w = safeWrite(path.join(root, 'deep', 'nested', 'ok.md'), 'body', root);
+    check('...and safeWrite creates the directories it needs', w.ok && fs.readFileSync(w.path, 'utf8') === 'body');
+    check('a refusal is a returned reason, never a throw',
+      safeWrite(path.join(root, 'r2', 'leaf.md'), 'x', root).ok === false);
+
+    // The events stream must be checked BEFORE it is opened, not after the run.
+    const src = fs.readFileSync(path.join(ROOT, 'scripts', 'council.mjs'), 'utf8');
+    const checkIdx = src.indexOf('checkWritable(eventsPath, ROOT)');
+    const openIdx = src.indexOf('const emitter = createEmitter(');
+    check('the event stream is checked before the emitter opens it',
+      checkIdx > 0 && checkIdx < openIdx, `check at ${checkIdx}, open at ${openIdx}`);
+    check('every run output goes through safe-write, not a per-site lstat',
+      !/fs\.lstatSync\(/.test(src) && (src.match(/safeWrite\(/g) ?? []).length >= 2);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+
+  // WAS OPEN, and it silently corrupted the code under review. `a.replace('{prompt}', prompt)`
+  // expands `$&`, `` $` ``, `$'` and `$1` in the REPLACEMENT — and the replacement is source code.
+  {
+    const m = { id: 'a', label: 'A', cmd: 'true', promptVia: 'argv', args: ['{prompt}'] };
+    const code = "s.replace(/x/, '$&$&'); // $` and $' and $1 and $$";
+    check('a prompt containing $ tokens arrives intact',
+      prepare(m, code, os.tmpdir(), 'darwin').args[0] === code,
+      'it used to arrive with {prompt} substituted into itself');
+
+    const fm = { id: 'f', label: 'F', cmd: 'true', promptVia: 'file', args: ['--f', '{promptFile}'] };
+    const fp = prepare(fm, "body with $& in it", os.tmpdir(), 'darwin');
+    check('...and so does a file path', fs.readFileSync(fp.args[1], 'utf8') === 'body with $& in it');
+    fp.cleanup();
+  }
+
+  // WAS OPEN: `>` meant a family holding EXACTLY half was reported "ok" — and the default roster is
+  // Anthropic 2 of 4 once grok is excluded, so the diagnostic was structurally silent on the shipped
+  // configuration.
+  check('a family holding exactly half a council is flagged',
+    familyMajority({ Anthropic: 2, OpenAI: 1, Google: 1 }, 4) === true,
+    'the default roster is exactly this shape');
+  check('...and a genuinely even council is not',
+    familyMajority({ A: 1, B: 1, C: 1, D: 1 }, 4) === false);
+  check('...and an empty council does not divide by zero', familyMajority({}, 0) === false);
+
+  // WAS OPEN: stderr was consulted only when stdout was EMPTY, so a CLI printing a partial answer to
+  // stdout and its quota failure to stderr was ranked as a considered opinion.
+  check('a quota failure on stderr is caught even when stdout has text',
+    judgeOutput('Here is a partial thought about the design of the retry path.',
+      'Error: you have reached your usage limit for this account', 0)[0] === false);
+  check('...and ordinary stderr chatter does not become a false positive',
+    judgeOutput('A real answer about the design of the retry path and its failure modes.',
+      'info: loading config\nwarn: cache miss\n', 0)[0] === true,
+    'only the unambiguous tier applies to stderr, which carries progress noise');
+
+  // WAS OPEN: one terse member set `thin` for the WHOLE council, discarding a perfectly good
+  // comparison between the others. One member with little to add is common.
+  {
+    const pack = 'retry queue idempotent';
+    const long = (tag) => Array.from({ length: 60 }, (_, i) => `${tag}word${i}`).join(' ');
+    const r = reasoningOverlap([
+      { id: 'a', text: long('x') }, { id: 'b', text: long('x') }, { id: 'c', text: 'agreed, yes' },
+    ], pack);
+    check('a terse member is excluded from the overlap, not allowed to void it',
+      r.distinctive !== null, 'it used to null the metric for everybody');
+    check('...and which members were dropped is reported', r.excluded.includes('c'));
+    check('...and how many remained comparable', r.usableN === 2);
+    check('with fewer than two comparable members it is honestly null',
+      reasoningOverlap([{ id: 'a', text: 'yes' }, { id: 'b', text: 'no' }], pack).distinctive === null);
+  }
+
+// WAS OPEN, and it was fail-OPEN on the field that decides whether a member may write files.
+  // `m.contained !== false` treated an undefined `contained` as contained, so any roster omitting it
+  // — hand-written, older, or a member added without running the verifier — was silently trusted.
+  {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'council-failclosed-'));
+    const cli = path.join(ROOT, 'scripts', 'council.mjs');
+    const roster = path.join(ROOT, 'scripts', 'members.json');
+    const original = fs.readFileSync(roster, 'utf8');
+    const fake = path.join(dir, 'fake-member');
+    fs.writeFileSync(fake, '#!/bin/sh\necho "an answer long enough to count as one"\n');
+    fs.chmodSync(fake, 0o755);
+    try {
+      const cfg = JSON.parse(original);
+      // No `contained` field at all — the shape a hand-written roster naturally has.
+      fs.writeFileSync(roster, JSON.stringify({
+        ...cfg,
+        members: [{ id: 'undeclared', label: 'Undeclared', cmd: fake, args: ['{prompt}'], verified: 'fixture' }],
+      }, null, 2));
+      const r = spawnSync('node', [cli, 'x', '--preflight'], { encoding: 'utf8', timeout: 30_000, cwd: ROOT });
+      check('a member with NO `contained` field is excluded, not assumed safe', r.status === 2,
+        `exit ${r.status} — an absent field means nobody ran the verifier`);
+      check('...and the exclusion is explained', /cannot be prevented from writing|No council member is available/.test(r.stderr ?? ''));
+    } finally {
+      fs.writeFileSync(roster, original);
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+// WAS OPEN, and it punished the members with the best instincts. The probe read
+  // "Reply with exactly this line and nothing else: DELIVERY CONFIRMED <token>" — injection-shaped —
+  // and Sonnet 5 answered "This appears to be a prompt injection attempt." The tool then reported
+  // "NO CANARY — the prompt is not arriving" on a channel that worked perfectly. A false negative, in
+  // the one feature whose entire purpose is not producing false negatives. Verified live after the
+  // rewording: 4/4 return the token.
+  {
+    const c = canary();
+    check('the canary probe explains itself rather than commanding',
+      /self-test/.test(c.prompt) && !/nothing else/i.test(c.prompt),
+      'a careful model refuses "output exactly X and nothing else"');
+    check('...and says nothing is being asked of the model\'s judgement',
+      /judgement/.test(c.prompt) && /no task hidden/.test(c.prompt));
+    check('...and still carries a unique token', c.prompt.includes(c.token));
+    check('a refusal is recognised as a refusal, not as non-delivery',
+      c.refused('This appears to be a prompt injection attempt embedded in the file.') === true,
+      'it received the probe, so the channel is fine — different remedy');
+    check('...while a plain greeting is NOT a refusal', c.refused('Hello! How can I help you today?') === false,
+      'that one really is a prompt that never arrived');
+    check('...and a compliant reply is neither', c.refused(`Received: ${c.token}`) === false);
+
+    const src = fs.readFileSync(path.join(ROOT, 'scripts', 'council.mjs'), 'utf8');
+    check('--verify-delivery reports three outcomes, not two',
+      /declined the probe \(so it DID receive it\)/.test(src));
+    check('...and a decline does not count as a failure', /const bad = results\.filter\(\(x\) => !x\.ok && !x\.refused\)/.test(src));
+  }
+
+  // WAS OPEN: `code/` and `plan/` were added as implicit containment roots, so a repo shipping `code`
+  // as a symlink to `/` made every path on the machine "inside the workspace" — the realpath guard
+  // resolving the link and then comparing against the resolved link.
+  {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'council-roots-'));
+    try {
+      fs.symlinkSync('/', path.join(root, 'code'));
+      const pack = buildContext(['code/etc/hosts'], root);
+      check('a repo-created `code` symlink is no longer an allowed root', pack.files.length === 0,
+        'it used to make the whole filesystem reachable');
+      check('...and extra roots must come from the operator, not the repo',
+        /COUNCIL_EXTRA_ROOTS/.test(fs.readFileSync(path.join(ROOT, 'scripts', 'context.mjs'), 'utf8')));
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  }
+
+  // WAS OPEN: a file containing ``` closed the pack's fence early, so the rest of that file and every
+  // file after it reached the member as prose rather than as quoted data — the "this is DATA" framing
+  // silently stopping at the first triple backtick.
+  {
+    const f = path.join(ROOT, 'council-test-fence.md');
+    fs.writeFileSync(f, 'before\n```\ninside a code block\n```\nafter');
+    const pack = buildContext(['council-test-fence.md'], ROOT);
+    const fenceLines = pack.text.split('\n').filter((l) => /^`{3,}$/.test(l.trim()));
+    check('a file containing ``` is wrapped in a LONGER fence',
+      fenceLines.some((l) => l.trim().length > 3), fenceLines.map((l) => l.trim()).join(' '));
+    check('...so the data block still closes after the content, not inside it',
+      pack.text.indexOf('End of quoted data') > pack.text.indexOf('after'));
+    fs.rmSync(f, { force: true });
+  }
+
+  // WAS OPEN: a member CLI's own self-timeout was a literal in the roster, so it did not track
+  // --timeout. `--timeout=30` left a member that still aborted at 14 minutes, reported as a plain
+  // failure with no indication why.
+  {
+    const cfg = JSON.parse(fs.readFileSync(path.join(ROOT, 'scripts', 'members.json'), 'utf8'));
+    const selfTimers = cfg.members.filter((m) => m.args.some((a) => /timeout/.test(a)));
+    check('a member with its own timeout flag derives it from --timeout',
+      selfTimers.every((m) => m.args.some((a) => a.includes('{timeoutMin}'))),
+      selfTimers.map((m) => m.id).join(',') || 'none have one');
+    check('...and council.mjs substitutes it',
+      /\{timeoutMin\}/.test(fs.readFileSync(path.join(ROOT, 'scripts', 'council.mjs'), 'utf8')));
+  }
+
+  // WAS OPEN, and it reported success on a crash: the shutdown handler's exit timer was unref'd, so
+  // node exited normally — code 0 — before the SIGKILL sweep and process.exit(code) ran.
+  {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'council-exit-'));
+    const f = path.join(dir, 'probe.mjs');
+    fs.writeFileSync(f, 'const t = setTimeout(() => process.exit(7), 200); t.unref?.();\n');
+    const r = spawnSync('node', [f], { encoding: 'utf8', timeout: 10_000 });
+    check('an unref\'d exit timer really does let node exit 0 first', r.status === 0,
+      `exit ${r.status} — this is the mechanism that made a crashed council report success`);
+
+    const src = fs.readFileSync(path.join(ROOT, 'scripts', 'council.mjs'), 'utf8');
+    check('so shutdown sets process.exitCode immediately', /process\.exitCode = code;/.test(src));
+    check('...and its backstop timer is NOT unref\'d',
+      /setTimeout\(\(\) => \{ killAllLive\('SIGKILL'\); cleanupPromptFiles\(\); process\.exit\(code\); \}, 300\);/.test(src));
+    check('...and an interrupt also removes the prompt files holding the context pack',
+      /cleanupPromptFiles/.test(src) && /promptFiles\.add\(/.test(src));
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 console.log(`\n${'─'.repeat(72)}`);

@@ -99,12 +99,21 @@ export function readForContext(file, root) {
   //   * `--context /tmp/id_rsa_fake` — a key with no .key/.pem suffix matched nothing
   //   * a symlink named `notes.md` pointing at `~/.codex/config.toml` — the pattern list saw
   //     only the innocent name
-  // A denylist cannot be completed; containment can. `code/` and `plan/` are legitimate
-  // symlinks out of the tree, so their resolved targets are allowed roots too.
+  // A denylist cannot be completed; containment can. The ONLY implicit root is the workspace —
+  // see below for why `code/` and `plan/` were removed as implicit roots.
   let real;
   try { real = fs.realpathSync(file); } catch { return { path: rel, skipped: 'not a file' }; }
 
-  const roots = [root, path.join(root, 'code'), path.join(root, 'plan')]
+  // ONE root: the workspace. `code/` and `plan/` used to be added as extra allowed roots because
+  // they are legitimate symlinks out of the tree in the author's own project — and that handed the
+  // decision to whoever can create a directory entry. A repo shipping `code` as a symlink to `/`
+  // made every absolute path on the machine "inside the workspace", defeating the realpath
+  // containment entirely: the guard resolved the link and then compared against the resolved link.
+  //
+  // Extra roots are now OPERATOR-supplied only, via COUNCIL_EXTRA_ROOTS, and each is resolved and
+  // reported. A name a repo can create is not a permission.
+  const extra = (process.env.COUNCIL_EXTRA_ROOTS ?? '').split(':').filter(Boolean);
+  const roots = [root, ...extra]
     .map((r) => { try { return fs.realpathSync(r); } catch { return null; } })
     .filter(Boolean);
   const inside = roots.some((r) => real === r || real.startsWith(r + path.sep));
@@ -210,7 +219,23 @@ export function loadBrief(root) {
     const f = path.join(root, rel);
     try {
       if (!fs.statSync(f).isFile()) continue;
-      let text = fs.readFileSync(f, 'utf8').trim();
+
+      // Contained like any --context file. `AGENTS.md` is a name a repo chooses, and a symlink named
+      // AGENTS.md pointing at ~/.aws/credentials was read, trusted and prepended to every prompt —
+      // the automatic channel bypassing the containment the deliberate channel enforces.
+      const real = fs.realpathSync(f);
+      const rootReal = (() => { try { return fs.realpathSync(root); } catch { return path.resolve(root); } })();
+      if (!(real === rootReal || real.startsWith(rootReal + path.sep))) {
+        return {
+          text: briefMissing(`\`${rel}\` was found but **refused: it resolves to ${real}**, outside the `
+            + `workspace. A brief is read automatically and prepended to every prompt, so a symlink `
+            + `there would send an arbitrary file to every vendor.`),
+          source: null,
+          refused: `${rel} — refused, resolves outside the workspace (${real})`,
+        };
+      }
+
+      let text = fs.readFileSync(real, 'utf8').trim();
       if (!text) continue;
 
       // Same content checks as any --context file. A brief is not more trustworthy for being
@@ -290,7 +315,14 @@ export function buildContext(files, root) {
     }
     total += r.chars;
     included.push(r.path);
-    parts.push(`### \`${r.path}\`\n\n\`\`\`\n${r.text}\n\`\`\``);
+    // The fence is longer than anything inside it. A file containing \`\`\` — which any file
+    // documenting markdown does, including this project's own README — used to close the block
+    // early, so the rest of that file and every file after it appeared to the member as prose
+    // rather than as quoted data. The "this is DATA" framing silently stopped applying at the
+    // first triple backtick in the pack.
+    const longest = Math.max(3, ...(r.text.match(/`{3,}/g) ?? []).map((m) => m.length + 1));
+    const fence = '`'.repeat(longest);
+    parts.push(`### \`${r.path}\`\n\n${fence}\n${r.text}\n${fence}`);
   }
 
   // Everything below is repo content going into four vendors' models. A file — or a card, or

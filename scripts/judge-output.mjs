@@ -26,7 +26,8 @@
  */
 export const UNAMBIGUOUS = [
   /\b(usage|rate|quota) limit (reached|exceeded|hit)\b/i,
-  /\byou'?ve (hit|reached) your .{0,20}\blimit\b/i,
+  /\byou(?:'?ve| have| are) (?:hit|reached|out of) .{0,24}\blimit\b/i,
+  /\b(usage|rate|quota|token) limit\b.{0,40}\b(reset|resets|try again)\b/i,
   /\b(insufficient (credit|quota)|billing[_ ]not[_ ]active|payment required)\b/i,
   /\bauthentication (failed|error)\b/i,
   /\b(not logged in|please (log ?in|sign ?in))\b/i,
@@ -81,6 +82,17 @@ export function judgeOutput(out, err, code) {
     || (firstLine.length <= STATUS_LINE_MAX && FIRST_LINE_ONLY.some((re) => re.test(firstLine)));
   if (refusal) {
     return [false, `refused: the CLI reported a limit or auth failure — "${firstLine.slice(0, 90)}"`];
+  }
+
+  // WAS OPEN: stderr was consulted ONLY when stdout was empty. A CLI that prints a partial answer to
+  // stdout and its failure to stderr therefore passed — "here is a partial thought about the design"
+  // plus "You have hit your usage limit" was ranked as a considered opinion. Only the UNAMBIGUOUS
+  // tier is applied here: stderr routinely carries progress chatter, and the terse signals would
+  // produce exactly the false positives this file's header warns are worse than the failure.
+  const errHead = (err || '').slice(0, HEAD);
+  if (errHead && UNAMBIGUOUS.some((re) => re.test(errHead))) {
+    return [false, `refused: the CLI reported a limit or auth failure on stderr — `
+      + `"${errHead.split('\n').find((l) => l.trim())?.slice(0, 90) ?? ''}"`];
   }
   return [true, text];
 }

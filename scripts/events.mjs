@@ -103,6 +103,7 @@ export function createEmitter({ file = null, toFd = null } = {}) {
   let fd = null;
   let broken = null;
 
+
   if (file) {
     try {
       // WAS OPEN: this computed the directory with a regex that requires a slash, so
@@ -122,9 +123,18 @@ export function createEmitter({ file = null, toFd = null } = {}) {
     } catch (e) { broken = e.message; }
   }
 
+  // A sink that cannot be written to AT ALL is a different fact from one that fails mid-run, and
+  // --events already treats the first as fatal. --json-events did not: an unopenable fd 3 was
+  // swallowed, so a parent that asked for the stream got silence and no way to tell it from a council
+  // still thinking. The package's own rule — "asked for and not delivered is a failure, not a
+  // detail" — was applied to one sink and not the other.
+  if (toFd !== null && broken === null) {
+    try { fs.writeSync(toFd, ''); } catch (e) { broken = `fd ${toFd} is not writable: ${e.message}`; }
+  }
+
   const write = (line) => {
     if (fd !== null) { try { fs.writeSync(fd, line); } catch { /* telemetry, not the product */ } }
-    if (toFd !== null) { try { fs.writeSync(toFd, line); } catch { /* reader went away */ } }
+    if (toFd !== null) { try { fs.writeSync(toFd, line); } catch { /* reader went away mid-run */ } }
   };
 
   return {
@@ -159,6 +169,14 @@ export function reduce(state, e) {
       break;
     case 'preflight':
       s.absent = e.absent ?? [];
+      // Mark them, so the renderer's `state !== 'absent'` filter has something to filter on. It
+      // never did: an uninstalled member sat at "queued" for the entire run, next to members that
+      // really were about to answer.
+      for (const m of s.absent) {
+        const known = s.members.get(m.id);
+        if (known) known.state = 'absent';
+        else s.members.set(m.id, { ...m, state: 'absent' });
+      }
       break;
     case 'context':
       s.context = { files: e.files ?? [], refused: e.refused ?? [], tokens: e.tokens, budgetTokens: e.budgetTokens };

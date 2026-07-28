@@ -51,7 +51,14 @@
     "cannot write - a cwd probe and an absolute-path escape probe. Do not hand-edit it to true.",
     "",
     "council.mjs EXCLUDES an uncontained member by default. A four-member council that keeps the",
-    "package's promise is worth more than a five-member one that quietly breaks it."
+    "package's promise is worth more than a five-member one that quietly breaks it.",
+    "",
+    "-- {timeoutMin}: a member CLI must not out-wait, or under-wait, the council --",
+    "",
+    "agy self-aborts after --print-timeout (default 5m). Pinning it to a literal 14m was right for the",
+    "default --timeout of 15 and silently wrong for every other value: --timeout=30 left a member that",
+    "still quit at 14 minutes and was reported as a plain failure. {timeoutMin} is substituted from the",
+    "run’s actual --timeout, one minute under it, so the two cannot drift."
   ],
   "scratchDir": "~/.nexa-council-scratch",
   "members": [
@@ -116,10 +123,10 @@
         "--effort",
         "high",
         "--print-timeout",
-        "14m"
+        "{timeoutMin}m"
       ],
       "verified": "2026-07-28, 16s floor",
-      "note": "Reached via Antigravity (agy 1.1.8), NOT the gemini CLI — that one now refuses this account outright: 'no longer supported for Gemini Code Assist for individuals'. gemini-3.1-pro-high is the highest 3.1 tier offered; there is no -max. THE ONLY argv-ONLY MEMBER: `agy` has no stdin path and no --prompt-file, and piping to it silently answers an empty prompt. So it is the one member that can be refused for prompt size on Linux, and the one whose prompt is visible in the process table. --print-timeout is pinned to 14m because it DEFAULTS TO 5m — under our 15m member timeout, so on a large context it would abort itself and be reported as a failure with no indication why.",
+      "note": "Reached via Antigravity (agy 1.1.8), NOT the gemini CLI — that one now refuses this account outright: 'no longer supported for Gemini Code Assist for individuals'. gemini-3.1-pro-high is the highest 3.1 tier offered; there is no -max. THE ONLY argv-ONLY MEMBER: `agy` has no stdin path and no --prompt-file, and piping to it silently answers an empty prompt. So it is the one member that can be refused for prompt size on Linux, and the one whose prompt is visible in the process table. --print-timeout is substituted from --timeout ({timeoutMin}m) because it DEFAULTS TO 5m — under our 15m member timeout, so on a large context it would abort itself and be reported as a failure with no indication why.",
       "readOnlyBy": [
         "--mode",
         "plan"

@@ -124,6 +124,16 @@ Then three rules, in the order they are usually ignored:
 **Stage 3 is yours.** The script stops after the peer review deliberately: a chairman running
 as a subprocess has the answers and not the reason the question was asked.
 
+## Two things that will surprise you if nobody says them
+
+**A repo cannot supply the roster.** `.council/members.json` is ignored unless `--local-roster` is
+passed, and even then its `contained` flag is stripped. Every field in a roster is a command this
+script executes, so a cloned repository would otherwise choose what runs. If a user asks why their
+`.council/members.json` had no effect, that is the answer.
+
+**Windows is refused, not degraded.** Use WSL. Executable lookup and the never-hang teardown are both
+POSIX-only, and pretending otherwise reported every member as missing.
+
 ## When it cannot run
 
 **Nothing is ever retried**, and it never hangs. A missing CLI is named before anything starts;

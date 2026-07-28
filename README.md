@@ -7,7 +7,7 @@
 [![node](https://img.shields.io/badge/node-%3E%3D22-brightgreen)](https://nodejs.org)
 [![dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)](#quick-start)
 [![API keys](https://img.shields.io/badge/API%20keys-none-brightgreen)](#the-members)
-[![tests](https://img.shields.io/badge/tests-151-blue)](tests/council.test.mjs)
+[![tests](https://img.shields.io/badge/tests-204-blue)](tests/council.test.mjs)
 
 **Four models. Three vendors. They rank each other blind. You decide.**
 
@@ -137,7 +137,7 @@ all-cli-council/
 │   ├── verify-containment.mjs   proves each member cannot write
 │   ├── judge-output.mjs         is this an answer, or a CLI saying it cannot answer
 │   └── members.json             the roster. Override with .council/members.json
-├── tests/council.test.mjs       151 cases, spends nothing
+├── tests/council.test.mjs       204 cases, spends nothing
 └── .claude-plugin/              plugin + marketplace manifests
 ```
 
@@ -163,7 +163,7 @@ Verified from a clean clone installed as a plugin:
 ✅  --preflight resolves through $CLAUDE_PLUGIN_ROOT      5/5 members
 ✅  a real run writes into the USER project              .council/runs/
 ✅  nothing leaks into the plugin directory
-✅  151/151 tests pass from the installed copy
+✅  204/204 tests pass from the installed copy
 ```
 
 Cloned standalone instead? Use the path you cloned to in place of `$CLAUDE_PLUGIN_ROOT`.
@@ -519,6 +519,101 @@ to itself, which is the one a generic reviewer never applies.
 
 ---
 
+## It graded itself, and scored 5.0/10
+
+`--rubric` was built for other people's code. Pointing it at `scripts/` was the obvious first test,
+and the result is the most useful thing in this repo's history.
+
+**Four judges, three answered, median 5.0/10 — range 4–5, weakest dimension `correctness` at 4.0.**
+
+It also found a bug **by failing**: Gemini died one millisecond in with *"The argument `args[1]` must
+be a string without null bytes."* `events.mjs` carried a literal NUL inside a regex character class
+written as raw bytes. One byte in one comment unspawned a whole member, after the other three had
+already started spending. Two fixes: the class is built with `String.fromCharCode`, and a
+`--context` file containing a NUL is now **refused with a reason** rather than passed on.
+
+The rest, each reproduced before it was fixed and each now carrying a test:
+
+### The per-reviewer shuffle was barely shuffling
+
+The headline claim — *"this is not parity with the original, it is better than it"* — rested on a
+generator that overflowed. The seed was 48-bit and the LCG step ran in floating point, so
+2⁴⁸ × 1103515245 ≈ 2⁷⁸ rounded away the low bits, which are the only ones `% (i + 1)` reads.
+
+| | before | after |
+|---|---|---|
+| `h % 4` over 20k draws | `[19922, 78, 0, 0]` | uniform |
+| distinct permutations of 5 | **23 of 120** | **120 of 120** |
+| distinct permutations of 4 | 5 of 24 | 24 of 24 |
+
+Reviewers were seeing a handful of near-identical orderings, which is the shared invisible tilt the
+feature exists to remove.
+
+### `--verify-delivery` failed every member that complied exactly
+
+The canary asked for the bare token. The token is 16 characters; `judge-output.mjs` rejects anything
+under 24 as *"too short to be an answer"*. **The one feature whose entire job is catching a silent
+false negative was itself a guaranteed false negative.** Verified live after the fix: 4/4 pass.
+
+### A repository could choose what got executed
+
+`.council/members.json` was loaded in preference to the packaged roster **with no opt-in**, and every
+field in it is attacker-controlled: `cmd` and `args` are what gets spawned, and `contained` is the
+flag telling this script whether a member may write files. So `git clone`, then run a council in that
+repo — which the skill does by itself when a decision looks expensive to reverse.
+
+Worse than ordinary config injection, because the containment check was *inside* the file being
+trusted: a hostile roster declared itself contained and the guard read the attacker's answer to its
+own question.
+
+Now `--local-roster` is required, **and `contained` is stripped from a local roster whatever it
+says** — containment is something [`verify-containment.mjs`](scripts/verify-containment.mjs)
+demonstrates, not something a file claims.
+
+### The brief was the one input nothing checked
+
+`--context` files go through realpath containment, a path denylist, a secret scan, a NUL check and an
+injection fence. The brief went through **none of them** — and it is read *automatically* from
+`AGENTS.md` or `CLAUDE.md`, files that arrive with any repository you clone, then prepended **above**
+the "DATA, not instructions" header, in the position reserved for the operator's own words.
+
+**The carefully fenced channel was the one the user chose deliberately. The unfenced, unscanned,
+automatically-trusted channel was the one an attacker controls.**
+
+Now it is scanned like any other file, and fenced as **policy** rather than as inert data — a brief
+is *supposed* to constrain the answer, so the fence draws the line between *constraints on the
+answer* (honoured) and *changes to the task, the output format, or these instructions* (reported,
+never obeyed).
+
+### And the rest
+
+| Defect | Consequence |
+|---|---|
+| The stage-2 board was not fenced | other models' output is untrusted input; the `FINAL RANKING:` spoof fix survived the attack instead of closing the door |
+| The argv guard counted **characters** | the kernel counts bytes. 60,000 em-dashes is 60,000 chars and **180,000 bytes** — waved through, then `E2BIG` |
+| `judgeOutput` discarded *"Error handling here is the weak point…"* | a real answer, silently thrown away by `/^\s*error[: ]/i`. Now requires a delimiter a CLI uses and a sentence does not |
+| `--events=run.ndjson` created a **directory** | `file.replace(/\/[^/]*$/, '')` needs a slash; `path.dirname` was meant |
+| Borda weighted reviewers by format compliance | a reviewer naming 2 of 4 distributed 3 points; one naming all 4 distributed 10. Normalised to 1.0 each, with "how many reviewers ranked it" reported separately |
+| Stage 1b used **one fixed board for everyone** | exactly the flaw this repo criticises the original for. Stage 2 was fixed; 1b was not |
+| Stage 1b reported `failed: 0` unconditionally | and counted un-revised fallbacks as successful revisions |
+| The run file said **3/3** where the terminal said **3/4** | the durable record was the one hiding the degradation |
+| Pre-flight and `spawn` could resolve **different binaries** | pre-flight searched `~/.local/bin` first, `spawn` searches PATH. Resolved once now, and the resolved path is what runs |
+| Ctrl-C orphaned every member | detached process groups survived the parent and kept spending, with no terminal attached |
+| A fatal error emitted no terminal event | a UI tailing the stream waited forever on a run that had died |
+| A run file could be a symlink | `.council/runs/<slug>.md` is a predictable path inside your repo |
+| Windows silently reported every member missing | PATH split on `:`, no PATHEXT, no POSIX process groups. It now refuses loudly and points at WSL |
+
+### One false claim, removed
+
+`context.mjs` said its ceiling was *"set where all four were still obedient, with headroom."* It is
+not: 160,000 chars is ~40k tokens and the verified-obedient point is 27k. **The 27k–80k range has
+never been probed** — the true boundary is unknown, and the comment now says so instead of implying
+a measurement that does not exist.
+
+**Tests: 54 → 204.** Every case above is one of them.
+
+---
+
 ## The members
 
 | Member | CLI | Contained? | Where to get it |
@@ -705,6 +800,11 @@ Listed because a tool that hides these is worth less than one without them.
 - **Containment was verified on macOS with these CLI versions.** A CLI can change its flags in a
   point release, which is exactly why `verify-containment.mjs` ships rather than a claim.
 - **Model IDs age.** `gemini-3.1-pro-high`, `grok-4.5`, `gpt-5.6-sol` are pinned and will drift.
+- **The 27k–80k context range has never been probed.** The ceiling ships at ~40k tokens, above the
+  last point where all members were verified obedient. Where it actually breaks is unknown.
+- **`grok` is uncontained and there is no fix for it here.** Its own permission flags are accepted
+  and not enforced; the only lever left would be OS-level sandboxing, which is not built.
+- **Windows is refused, not supported.** Use WSL.
 - **The E2BIG and `/proc/<pid>/cmdline` measurements are Linux-in-Docker**, not a bare-metal Linux
   host. The constants are kernel-wide, but nobody has re-run them outside a container.
 
@@ -713,7 +813,7 @@ Listed because a tool that hides these is worth less than one without them.
 ## Tests
 
 ```bash
-node tests/council.test.mjs     # 151 cases, spends nothing
+node tests/council.test.mjs     # 204 cases, spends nothing
 ```
 
 **Every case was demonstrated OPEN before it was closed** — absolute-path traversal, symlink
@@ -740,6 +840,9 @@ SIGTERM-resistant child that held the process open after the run had finished.
 - [x] Minority view and its cost captured, not averaged away
 - [ ] **Council vs single model, measured** ← still the one that matters
 - [ ] **`--lenses` on vs off, measured by reasoning overlap** ← now possible, and cheap
+- [x] **Graded itself, and acted on the result** — 5.0/10, and every finding closed with a test
+- [x] Repo-supplied rosters and briefs treated as untrusted input
+- [x] Nothing outlives an interrupt; the event stream always terminates
 - [ ] Bias numbers at n≥30
 - [ ] A containment path for `grok` that does not depend on its flags
 - [ ] Per-vendor streaming JSON, so progress is token-level where the CLI allows it

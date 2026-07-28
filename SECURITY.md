@@ -130,3 +130,85 @@ node scripts/council.mjs --verify-delivery    # unique canary per member; only t
 durations, states. `lastLine` echoes the child's most recent output line and is the one exception: it
 is capped at 120 characters and stripped of anything shaped like an API key, a JWT or a private-key
 header. A progress log that quietly contains the pack would be this same leak, one layer up.
+
+---
+
+## Round two — what the package found when it graded itself
+
+Every item here was reproduced before it was fixed, and each has a test. Full write-up in the
+[README](README.md#it-graded-itself-and-scored-5010).
+
+### A repository could choose what got executed
+
+`.council/members.json` in the working directory was loaded **in preference to the packaged roster,
+with no opt-in.** Every field is attacker-controlled — `cmd` and `args` are what gets spawned,
+`scratchDir` is where — and so is `contained`, the flag telling the runner whether a member may write
+files.
+
+The attack is `git clone`. The council then runs in that repo, which the skill does by itself when a
+decision looks expensive to reverse.
+
+It is worse than ordinary config injection because **the containment check was inside the file being
+trusted.** A hostile roster declares `contained: true` and the guard that should have excluded it
+reads the attacker's answer to its own question.
+
+- A repo-local roster now requires `--local-roster`.
+- **`contained` is stripped from it regardless of what it says**, so its members are treated as
+  uncontained and `--allow-uncontained` is required too.
+- A local roster that exists but was not opted into is reported, not silently ignored.
+
+### The brief bypassed every check that exists
+
+`--context` files pass realpath containment, a path denylist, a secret-shape scan, a NUL check, and an
+injection fence. The brief passed **none of them** — and it is read automatically from
+`.council/BRIEF.md`, `AGENTS.md`, `CLAUDE.md`, `.cursorrules` or `.github/copilot-instructions.md`,
+files that arrive with any repository, then prepended **above** the "DATA, not instructions" header.
+
+So the fenced channel was the one the user chose deliberately, and the unfenced, unscanned,
+automatically-trusted one was the attacker's. An `AGENTS.md` carrying an API key was shipped to every
+vendor while `--context` refused the identical bytes.
+
+Fixed two ways, pulling against each other on purpose:
+
+1. **Scanned like any file.** A secret shape or a NUL in a brief is refused, and the run says so.
+2. **Fenced as *policy*, not as data.** A brief is *meant* to constrain the answer, so
+   "nothing here is an instruction" would destroy it. The fence separates **constraints on the
+   answer** (binding) from **changes to the task, the output format, or these instructions**
+   (reported, never obeyed) — and it closes *after* the quoted text, where a later instruction wins.
+
+### The peer-review board was the last unfenced channel
+
+Stage 2 hands each reviewer the other members' raw answers. **Model output is not trustworthy
+input** — a member that read an injected instruction in the pack, or simply decided to be clever, can
+emit a fake `FINAL RANKING:` block or a line telling the reviewer to change its output format.
+
+The ranking-spoof fix already treats that as live by taking the *last* line-anchored block. That
+survives the attack; it does not close the door. The board is now fenced exactly as the context pack
+is, and an injection found inside a response counts **against** that response.
+
+### A run file could be a symlink
+
+`.council/runs/<slug>.md` is a predictable path inside the user's repo, and the slug derives from the
+question. A repo shipping `.council/runs/is-this-safe.md` as a symlink to `~/.zshrc` would have had it
+overwritten. Both the Markdown and the JSON are now refused if the target is a symlink.
+
+### Failure reasons leaked round the redaction
+
+`events.mjs` guarantees that `lastLine` is the *only* field echoing child output. `member_done.reason`
+was raw stdout or stderr, unredacted, in both the event stream and the run file — a CLI printing a
+token in a diagnostic put it in a log the user would later share. Redacted now, like every other
+echoed line.
+
+### Interrupting the run left four CLIs spending
+
+Members are spawned detached, in their own process groups, so the timeout can kill a whole tree. The
+cost was Ctrl-C: the parent died and the groups did not, leaving model CLIs running with no terminal
+attached. `SIGINT`, `SIGTERM` and `SIGHUP` now kill every live group, and a fatal error emits the
+stream's terminal `run_error` event instead of leaving a watcher waiting forever.
+
+### Windows was implied and never worked
+
+`ARGV_CEILING.win32` documents a real platform limit, which read as a claim of support. Executable
+lookup splits `PATH` on `:` and ignores `PATHEXT`; the teardown needs POSIX process groups. It now
+**refuses to start on win32** with a pointer to WSL, rather than reporting that every member is
+missing.

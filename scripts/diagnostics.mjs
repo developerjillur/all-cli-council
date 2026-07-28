@@ -331,11 +331,56 @@ export function familyMix(members) {
  * — it is the one part of the format that is trivially easy to comply with.
  */
 export function parseConfidence(text) {
-  const s = String(text ?? '');
-  const m = [...s.matchAll(/^[^\S\n]*CONFIDENCE:\s*(\d{1,3})\s*%?/gim)].at(-1);
-  const conf = m ? Math.min(100, parseInt(m[1], 10)) : null;
-  const w = [...s.matchAll(/^[^\S\n]*(?:WOULD CHANGE MY MIND IF|CHANGE MY MIND IF):\s*(.+)$/gim)].at(-1);
-  return { confidence: conf, changeMind: w ? w[1].trim().slice(0, 400) : null };
+  const conf = labelled(text, 'CONFIDENCE');
+  const n = conf === null ? null : parseInt(conf.match(/(\d{1,3})/)?.[1] ?? '', 10);
+  const mind = labelled(text, 'WOULD CHANGE MY MIND IF') ?? labelled(text, 'CHANGE MY MIND IF');
+  return {
+    confidence: Number.isFinite(n) ? Math.min(100, Math.max(0, n)) : null,
+    changeMind: mind ? mind.slice(0, 400) : null,
+  };
+}
+
+/**
+ * ── The value after `LABEL:` on a line, whatever markdown the model wrapped it in ──────────
+ *
+ * **This was losing data silently, and a lot of it.** The patterns were anchored as
+ * `/^[^\S\n]*CONFIDENCE:/` — a line start, optional whitespace, then the bare label. Models do not
+ * write bare labels. They write what looks right in markdown, and every one of these shapes failed:
+ *
+ *     **CONFIDENCE:** 80          bold label
+ *     **CONFIDENCE: 80**          bold whole line
+ *     ## CONFIDENCE: 80           heading
+ *     - CONFIDENCE: 80            list item
+ *     > CONFIDENCE: 80            quote
+ *     **Confidence:** 80          title case
+ *     | CONFIDENCE | 80 |         table row
+ *
+ * Eleven of fifteen realistic shapes returned `null`. And the failure is the bad kind: the run then
+ * reported *"did not state a confidence"* about a member that stated one clearly — so across six
+ * rounds of grading, judges shown as `—` in the confidence column had most likely complied in bold.
+ * A parser that only accepts one formatting choice is measuring formatting, not confidence.
+ *
+ * So the line is stripped of leading decoration and inline emphasis before matching, and the LAST
+ * match still wins — a member quoting someone else's `CONFIDENCE:` must not outrank its own closing
+ * line, which is the same reasoning `parseRanking` uses.
+ */
+export function labelled(text, label) {
+  const wanted = label.toLowerCase();
+  let found = null;
+  for (const raw of String(text ?? '').split('\n')) {
+    // Leading markdown: heading hashes, list bullets, blockquotes, table pipes, emphasis.
+    const line = raw.replace(/^[\s>#*\-+|]*/, '').replace(/\*\*|__|`/g, '').trim();
+    const at = line.toLowerCase().indexOf(`${wanted}:`);
+    if (at !== 0) {
+      // A table row puts the label and value in separate cells: `| CONFIDENCE | 80 |`.
+      const cells = raw.split('|').map((c) => c.replace(/\*\*|__|`/g, '').trim()).filter(Boolean);
+      if (cells.length >= 2 && cells[0].toLowerCase() === wanted) found = cells.slice(1).join(' ').trim();
+      continue;
+    }
+    const value = line.slice(wanted.length + 1).replace(/\*+$/, '').trim();
+    if (value) found = value;
+  }
+  return found;
 }
 
 /**
@@ -386,17 +431,41 @@ export function parseRubric(text) {
   const s = String(text ?? '');
   const scores = {};
   const notes = {};
-  for (const line of s.split('\n')) {
-    const m = line.match(/^[^\S\n]*(?:[-*|]\s*)?SCORE:\s*([^|]+?)\s*[|:]\s*\**(\d{1,2}(?:\.\d)?)\**\s*\/\s*10\s*(?:[|:]\s*(.*))?$/i);
+  for (const raw of s.split('\n')) {
+    // Same decoration stripping as `labelled`: a judge that writes its scores as a bold list, a
+    // heading or a table row means the same thing as one that writes them plainly, and a parser that
+    // only accepts the plain form throws away most of the grading it asked for.
+    const line = raw.replace(/^[\s>#*\-+|]*/, '').replace(/\*\*|__|`/g, '').trim();
+    const m = line.match(/^SCORE:\s*([^|]+?)\s*[|:]\s*(\d{1,2}(?:\.\d)?)\s*\/\s*10\s*(?:[|:]\s*(.*))?$/i);
     if (!m) continue;
-    const dim = m[1].trim().replace(/\*+/g, '').toLowerCase();
+    const dim = m[1].trim().toLowerCase();
     const val = parseFloat(m[2]);
     if (!dim || !Number.isFinite(val)) continue;
     scores[dim] = Math.max(0, Math.min(10, val));
-    if (m[3]) notes[dim] = m[3].trim().slice(0, 300);
+    if (m[3]) notes[dim] = m[3].trim().replace(/\|+$/, '').trim().slice(0, 300);
   }
-  const o = [...s.matchAll(/^[^\S\n]*\**OVERALL\**:\s*\**(\d{1,2}(?:\.\d)?)\**\s*\/\s*10/gim)].at(-1);
-  return { scores, notes, overall: o ? Math.max(0, Math.min(10, parseFloat(o[1]))) : null };
+  const o = labelled(s, 'OVERALL');
+  const n = o ? parseFloat(o.match(/(\d{1,2}(?:\.\d)?)\s*\/\s*10/)?.[1] ?? o.match(/(\d{1,2}(?:\.\d)?)/)?.[1] ?? '') : NaN;
+  return { scores, notes, overall: Number.isFinite(n) ? Math.max(0, Math.min(10, n)) : null };
+}
+
+/**
+ * Every occurrence of `LABEL:` in a document, decoration-tolerant.
+ *
+ * `labelled` returns the LAST match, which is right for a closing line a member states once. Findings
+ * are the opposite case: a judge emits many, and losing the ones it happened to bullet or bold means
+ * losing most of the review.
+ */
+export function labelledAll(text, label) {
+  const wanted = label.toLowerCase();
+  const out = [];
+  for (const raw of String(text ?? '').split('\n')) {
+    const line = raw.replace(/^[\s>#*\-+|]*/, '').replace(/\*\*|__|`/g, '').trim();
+    if (line.toLowerCase().indexOf(`${wanted}:`) !== 0) continue;
+    const value = line.slice(wanted.length + 1).replace(/\*+$/, '').trim();
+    if (value) out.push(value);
+  }
+  return out;
 }
 
 // ── a seeded shuffle, so a run is reproducible but position bias is not shared ────

@@ -55,7 +55,8 @@ import { checkWritable, safeWrite, mkdirpSafe } from './safe-write.mjs';
 import { createRenderer } from './render.mjs';
 import { prepare, deliveryOf, canary, argvCeiling } from './prompt-delivery.mjs';
 import { borda, verbosityR, familyMix, reasoningOverlap, parseConfidence, parseRubric,
-  aggregateScores, rankedLabels, shuffled, seedNum, familyMajority, OVERLAP_SUSPECT } from './diagnostics.mjs';
+  aggregateScores, rankedLabels, shuffled, seedNum, familyMajority, labelled, labelledAll,
+  OVERLAP_SUSPECT } from './diagnostics.mjs';
 import * as P from './prompts.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -1115,8 +1116,10 @@ if (wantPeerReview) {
     // Only from a review that actually succeeded. `r.text` on a failure is an error message or a
     // quota notice, and harvesting a "minority view" out of that put a CLI's diagnostic into the
     // section a chairman is told to weigh most carefully.
-    const minority = r.ok ? r.text.match(/^[^\S\n]*MINORITY VIEW WORTH KEEPING:\s*(.+)$/im)?.[1]?.trim() : null;
-    const lost = r.ok ? r.text.match(/^[^\S\n]*WHAT IS LOST IF THE TOP ANSWER WINS:\s*(.+)$/im)?.[1]?.trim() : null;
+    // Decoration-tolerant, like every other labelled field: a reviewer that bolds or bullets these
+    // means the same thing, and losing them means losing the section a chairman is told to weigh most.
+    const minority = r.ok ? labelled(r.text, 'MINORITY VIEW WORTH KEEPING') : null;
+    const lost = r.ok ? labelled(r.text, 'WHAT IS LOST IF THE TOP ANSWER WINS') : null;
 
     return { ...r, mine, order: order.map((x) => x.id), parsed, minority, lost };
   }));
@@ -1318,14 +1321,14 @@ const md = [
     ``,
     ...rubricPerJudge.flatMap((j) => {
       const src = good.find((o) => o.id === j.id);
-      const blocks = [...(src?.text ?? '').matchAll(/^[^\S\n]*FINDING:\s*(.+)$/gim)].map((m) => m[1].trim());
+      const blocks = labelledAll(src?.text ?? '', 'FINDING');
       return [
         `### ${j.label} — overall ${j.overall ?? '—'}/10, confidence ${confidences[j.id]?.confidence ?? '—'}`,
         ``,
         ...(blocks.length ? blocks.map((b) => `- ${b}`) : ['_no parseable FINDING: lines — see its full answer below_']),
         ``,
-        ...(src?.text.match(/^[^\S\n]*SINGLE BIGGEST WIN:\s*(.+)$/im)
-          ? [`**Biggest win, in its view:** ${src.text.match(/^[^\S\n]*SINGLE BIGGEST WIN:\s*(.+)$/im)[1].trim()}`, ``]
+        ...(labelled(src?.text ?? '', 'SINGLE BIGGEST WIN')
+          ? [`**Biggest win, in its view:** ${labelled(src.text, 'SINGLE BIGGEST WIN')}`, ``]
           : []),
       ];
     }),

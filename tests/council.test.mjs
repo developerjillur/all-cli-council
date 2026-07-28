@@ -23,7 +23,7 @@ import { up, clearBelow } from '../scripts/ansi.mjs';
 import { prepare, deliveryOf, canary, argvCeiling } from '../scripts/prompt-delivery.mjs';
 import { checkWritable, safeWrite } from '../scripts/safe-write.mjs';
 import { rankedLabels, borda, familyMix, familyMajority, reasoningOverlap, parseConfidence, parseRubric,
-  aggregateScores, shuffled, contentTokens } from '../scripts/diagnostics.mjs';
+  aggregateScores, shuffled, contentTokens, labelled, labelledAll } from '../scripts/diagnostics.mjs';
 import { assignLenses, LENSES, stage1, stage2, rubric, rubric1b, RUBRIC_DIMENSIONS } from '../scripts/prompts.mjs';
 import { judgeOutput, MIN_ANSWER_CHARS } from '../scripts/judge-output.mjs';
 
@@ -1905,6 +1905,90 @@ console.log('\n▸ Detach, status, feed — the three things a supervising agent
       Boolean(payload.pid && payload.events && payload.log), JSON.stringify(payload).slice(0, 80));
     fs.rmSync(dir, { recursive: true, force: true });
   }
+}
+
+// ── a parser that accepts one formatting choice measures formatting ──────────
+console.log('\n▸ Labelled fields — models write markdown, not bare labels');
+{
+  // WAS OPEN, and it was losing data silently across every round of grading. The patterns were
+  // anchored as `/^[^\S\n]*CONFIDENCE:/` — line start, whitespace, bare label. Models do not write
+  // bare labels; they write what looks right in markdown. Measured before the fix: **11 of 15
+  // realistic shapes returned null**, and the run then reported "did not state a confidence" about a
+  // member that had stated one clearly.
+  //
+  // Which means the `—` entries in six rounds of confidence columns were most likely compliance in
+  // bold, not non-compliance. That is the worst kind of bug in a diagnostic: it does not look broken,
+  // it looks like the members were sloppy.
+  for (const [what, line] of [
+    ['a bare label', 'CONFIDENCE: 80'],
+    ['a bold label', '**CONFIDENCE:** 80'],
+    ['a bold whole line', '**CONFIDENCE: 80**'],
+    ['a heading', '## CONFIDENCE: 80'],
+    ['a list item', '- CONFIDENCE: 80'],
+    ['a blockquote', '> CONFIDENCE: 80'],
+    ['title case', '**Confidence:** 80'],
+    ['a table row', '| CONFIDENCE | 80 |'],
+    ['a trailing percent', 'CONFIDENCE: 80%'],
+    ['ragged whitespace', '   CONFIDENCE:   80   '],
+    ['heading plus bold', '### **Confidence:** 80'],
+  ]) check(`confidence survives ${what}`, parseConfidence(line).confidence === 80,
+    `${JSON.stringify(line)} -> ${parseConfidence(line).confidence}`);
+
+  for (const [what, line] of [
+    ['plain', 'WOULD CHANGE MY MIND IF: seeing the caller'],
+    ['bold', '**WOULD CHANGE MY MIND IF:** seeing the caller'],
+    ['bulleted and bold', '- **WOULD CHANGE MY MIND IF:** seeing the caller'],
+  ]) check(`"what would change my mind" survives ${what}`,
+    /seeing the caller/.test(parseConfidence(line).changeMind ?? ''));
+
+  // The properties that had to SURVIVE the loosening.
+  check('the member\'s own last line still beats one it quoted',
+    parseConfidence('It said **CONFIDENCE: 99**\nmy answer\n**CONFIDENCE:** 40').confidence === 40,
+    'same reasoning as parseRanking taking the LAST block');
+  check('an absent confidence is still null, not a default',
+    parseConfidence('no numbers here at all').confidence === null);
+  check('an absurd confidence is still clamped', parseConfidence('CONFIDENCE: 900').confidence === 100);
+
+  // Rubric scores and the overall, same treatment.
+  for (const [what, line] of [
+    ['plain', 'SCORE: correctness | 7/10 | one real defect'],
+    ['bold', '**SCORE: correctness | 7/10 | one real defect**'],
+    ['bulleted', '- SCORE: correctness | 7/10 | one real defect'],
+    ['a table row', '| SCORE: correctness | 7/10 | one real defect |'],
+  ]) check(`a dimension score survives ${what}`, parseRubric(line).scores.correctness === 7,
+    JSON.stringify(parseRubric(line).scores));
+  check('...and the reason is still captured', /one real defect/.test(parseRubric('SCORE: correctness | 7/10 | one real defect').notes.correctness ?? ''));
+
+  for (const [what, line] of [
+    ['plain', 'OVERALL: 7/10'],
+    ['bold', '**OVERALL: 7/10**'],
+    ['a heading', '## OVERALL: 7/10'],
+    ['bulleted with a decimal', '- OVERALL: 7.5/10'],
+  ]) check(`the overall survives ${what}`,
+    parseRubric(line).overall === (what.includes('decimal') ? 7.5 : 7),
+    `${JSON.stringify(line)} -> ${parseRubric(line).overall}`);
+
+  check('prose mentioning 10 is still not harvested as a score',
+    Object.keys(parseRubric('I would rate this about 10 out of 10 honestly').scores).length === 0
+    && parseRubric('I would rate this about 10 out of 10 honestly').overall === null,
+    'loosening the anchor must not make it credulous');
+
+  // Findings are the many-occurrence case, where losing the decorated ones loses most of the review.
+  const findings = labelledAll('FINDING: a\n- **FINDING:** b\n> FINDING: c\n## FINDING: d', 'FINDING');
+  check('every FINDING shape is collected', findings.length === 4, `${findings.length}/4: ${findings.join('|')}`);
+  check('...in the order the judge wrote them', findings.join('') === 'abcd');
+  check('a singleton label takes the LAST, a repeated label takes ALL',
+    labelled('FINDING: a\nFINDING: b', 'FINDING') === 'b' && labelledAll('FINDING: a\nFINDING: b', 'FINDING').length === 2,
+    'the two helpers exist because those are different questions');
+
+  // And the stage-2 dissent fields, which the chairman is told to weigh most carefully.
+  const src = fs.readFileSync(path.join(ROOT, 'scripts', 'council.mjs'), 'utf8');
+  check('stage 2 extracts the minority view through the tolerant helper',
+    /labelled\(r\.text, 'MINORITY VIEW WORTH KEEPING'\)/.test(src));
+  check('...and "what is lost" too', /labelled\(r\.text, 'WHAT IS LOST IF THE TOP ANSWER WINS'\)/.test(src));
+  check('...and rubric findings', /labelledAll\(src\?\.text \?\? '', 'FINDING'\)/.test(src));
+  check('no hand-rolled label regex is left in council.mjs',
+    !/\^\[\^\\S\\n\]\*(?:FINDING|MINORITY|WHAT IS LOST|SINGLE BIGGEST)/.test(src));
 }
 
 // ── the CLI actually runs, end to end, with the flags it documents ───────────

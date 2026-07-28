@@ -42,7 +42,18 @@ node scripts/council.mjs "Is this cache invalidation actually correct?" --contex
 /plugin install all-cli-council@all-cli-council
 ```
 
-Then ask it anything:
+**It then works two ways.**
+
+**Automatically** — a skill ships with it, so Claude Code reaches for the council itself when
+the situation calls for it: **plan mode before committing to an approach**, architecture and
+schema decisions, concurrency and idempotency, security judgements, a review that came back
+uncertain, and anything whose failure mode is data loss or an outage. It announces the run and
+the estimate first, because a twenty-minute pause nobody expected reads as a hang.
+
+It is equally explicit about when *not* to — a knowable answer, a preference, or a choice that
+is uncomfortable rather than unclear.
+
+**Or on demand:**
 
 ```
 /council Is the retry logic in src/queue.js safe under a partial network partition?

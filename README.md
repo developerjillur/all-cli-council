@@ -11,7 +11,7 @@
 
 **Five models. Four vendors. They rank each other blind. You decide.**
 
-[Quick start](#quick-start) · [Why](#why-this-exists) · [What makes it different](#what-makes-it-different) · [Members](#the-members) · [The brief](#the-brief--the-cheapest-quality-win-available) · [Limits](#honest-limitations) · [Contributing](CONTRIBUTING.md)
+[Quick start](#quick-start) · [How it activates](#how-it-activates) · [What makes it different](#what-makes-it-different) · [Members](#the-members) · [The brief](#the-brief--the-cheapest-quality-win-available) · [FAQ](#faq) · [Limits](#honest-limitations) · [Contributing](CONTRIBUTING.md)
 
 </div>
 
@@ -42,22 +42,9 @@ node scripts/council.mjs "Is this cache invalidation actually correct?" --contex
 /plugin install all-cli-council@all-cli-council
 ```
 
-**It then works two ways.**
-
-**Automatically** — a skill ships with it, so Claude Code reaches for the council itself when
-the situation calls for it: **plan mode before committing to an approach**, architecture and
-schema decisions, concurrency and idempotency, security judgements, a review that came back
-uncertain, and anything whose failure mode is data loss or an outage. It announces the run and
-the estimate first, because a twenty-minute pause nobody expected reads as a hang.
-
-It is equally explicit about when *not* to — a knowable answer, a preference, or a choice that
-is uncomfortable rather than unclear.
-
-**Or on demand:**
-
-```
-/council Is the retry logic in src/queue.js safe under a partial network partition?
-```
+Then it works **two ways**: the skill fires it automatically when a decision is expensive to
+reverse, and `/council <question>` runs it on demand. See
+[how it activates](#how-it-activates).
 
 ### Standalone
 
@@ -76,6 +63,100 @@ node scripts/council.mjs "x" --preflight    # costs nothing
 ```
 
 You need **at least one** member. It runs with whatever is there and tells you what is missing.
+
+---
+
+## How it activates
+
+Two ways, and the first is the point.
+
+### Automatically — the skill decides
+
+A skill ships with the plugin, so **Claude Code reaches for the council itself** when the
+situation calls for it. You do not have to remember it exists.
+
+| It should fire when | Why a council rather than one answer |
+|---|---|
+| **Plan mode, before committing to an approach** | the plan is the most expensive thing to get wrong — everything after inherits the mistake |
+| **Architecture, schema, or a public interface** | reversal cost is high, and the error stays invisible until something depends on it |
+| **Concurrency, retries, idempotency, cache invalidation** | the failure is intermittent, so tests agreeing proves very little |
+| **A security judgement with no single right answer** | the failure mode is a breach, and one model's blind spot is the whole exposure |
+| **A review that came back uncertain, or two reviewers disagreeing** | that is exactly the signal a third and fourth reading is worth its cost |
+| **Verifying that a design holds** — not that code runs | tests answer *"is it internally consistent"*; this answers *"is it right"* |
+| **Failure would be data loss, a breach, or an outage** | half an hour is nothing against the cost of being wrong |
+| **A migration, deletion, or schema change on live data** | irreversible, and the review that matters happens before |
+
+**It announces the run and the estimate first** — *"this is expensive to reverse, I am putting
+it to the council, about 15 minutes."* A twenty-minute pause nobody expected reads as a hang.
+
+### It is equally explicit about when *not* to
+
+A skill that fires eagerly on a 10–30 minute tool is worse than no skill at all.
+
+| Do not | Because |
+|---|---|
+| the answer is **knowable** | it is in the code, a test, a log, or `grep`. Five models guessing is slower, worse, and **sounds more authoritative than one command that actually checks** |
+| the question is a **preference** | naming, formatting, layout. There is no fact to find |
+| you are **stuck, not uncertain** | a council will not tell you what the user wants |
+| the choice is **uncomfortable rather than unclear** | you get a well-argued average and a decision nobody owns |
+| anything **latency-sensitive**, or in a loop | a real run is minutes |
+
+**If unsure, do the cheap thing first.** A council after five minutes of reading is a much
+better council, because the question is sharper.
+
+### Or on demand
+
+```
+/council Is the retry logic in src/queue.js safe under a partial network partition?
+```
+
+The slash command is the guarantee. **Whether the skill fires is the model's judgement, not a
+rule** — the description is as specific as it can be, but if you need it to run, ask for it.
+
+---
+
+## What ships in the package
+
+```
+all-cli-council/
+├── skills/council/SKILL.md      ← the auto-invocation path. Without this it only
+│                                   runs when typed
+├── commands/council.md          ← /council, the on-demand guarantee
+├── scripts/
+│   ├── council.mjs              orchestration: 3 stages, bias maths, teardown
+│   ├── context.mjs              the pack — containment, secret refusal, injection fencing
+│   ├── judge-output.mjs         is this an answer, or a CLI saying it cannot answer
+│   └── members.json             the roster. Override with .council/members.json
+├── tests/council.test.mjs       54 cases, spends nothing
+└── .claude-plugin/              plugin + marketplace manifests
+```
+
+**No dependencies, no build, no `npm install`.** Node 22+ and the CLIs you already have.
+
+Output goes to **`.council/runs/`** in *your* project — never into the plugin directory.
+
+---
+
+## Verified as an installed plugin, not just locally
+
+The difference matters: a plugin runs with the **user's** project as the working directory, not
+its own. A path that works when you are sitting in the repo resolves to nothing once installed.
+
+That bug was real here — the skill and command both said `node scripts/council.mjs`, which
+**would have failed for every installer while working perfectly for the author.** Both now use
+`$CLAUDE_PLUGIN_ROOT`.
+
+Verified from a clean clone installed as a plugin:
+
+```
+✅  all four surfaces arrive — skill, command, scripts, tests
+✅  --preflight resolves through $CLAUDE_PLUGIN_ROOT      5/5 members
+✅  a real run writes into the USER project              .council/runs/
+✅  nothing leaks into the plugin directory
+✅  54/54 tests pass from the installed copy
+```
+
+Cloned standalone instead? Use the path you cloned to in place of `$CLAUDE_PLUGIN_ROOT`.
 
 ---
 

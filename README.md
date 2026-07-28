@@ -20,7 +20,7 @@ and that trade is [documented rather than hidden](#-three-of-five-members-could-
 
 ---
 
-Ask one model a hard question and you get one model's blind spots. Ask five and average them
+Ask one model a hard question and you get one model's blind spots. Ask several and average them
 and you get something none of them would defend.
 
 **All CLI Council does neither.** Every model answers alone, then ranks the others *without
@@ -158,15 +158,22 @@ That bug was real here — the skill and command both said `node scripts/council
 **would have failed for every installer while working perfectly for the author.** Both now use
 `$CLAUDE_PLUGIN_ROOT`.
 
-Verified from a clean clone installed as a plugin:
+Re-verified from a clean `git clone`, run with a **separate** directory as the working directory —
+which is what "installed as a plugin" actually means:
 
 ```
-✅  all four surfaces arrive — skill, command, scripts, tests
-✅  --preflight resolves through $CLAUDE_PLUGIN_ROOT      5/5 members
-✅  a real run writes into the USER project              .council/runs/
-✅  nothing leaks into the plugin directory
-✅  384/384 tests pass from the installed copy
+✅  all five surfaces arrive        skill, command, scripts, tests, plugin manifest
+✅  --preflight through the plugin root                    4/4 members available
+✅  the brief is read from the USER project                AGENTS.md
+✅  --context resolves against the USER project            src/thing.js
+✅  a real run writes into the USER project                .council/runs/{md,json,ndjson}
+✅  the plugin directory is untouched                      git status: 0 changed files
+✅  the environment allowlist holds                        7 passed to members, 50 withheld
+✅  384/384 tests pass from the fresh clone                and with no `npm install`
 ```
+
+**4/4, not 5/5** — `grok` is excluded by default because it cannot be prevented from writing. The
+older version of this block said 5/5, and kept saying it after the roster changed.
 
 Cloned standalone instead? Use the path you cloned to in place of `$CLAUDE_PLUGIN_ROOT`.
 
@@ -447,9 +454,9 @@ quietly contains the pack is the leak `context.mjs` exists to prevent, one layer
 `--json-events` sends the same stream to **fd 3** instead, for a parent process that wants it without
 a file: stderr belongs to the human, stdout carries the run-file path.
 
-### 🔬 Five models is one axis of diversity. `--lenses` adds a second
+### 🔬 Cross-vendor is one axis of diversity. `--lenses` adds a second
 
-The strongest objection to this council is in its own README: five models on overlapping training
+The strongest objection to this council is in its own README: models on overlapping training
 data agreeing is weak evidence. Four vendors buys less independence than the count suggests.
 
 [council-review](https://github.com/ngmeyer/council-review) argues the missing axis is not vendor but
@@ -483,7 +490,7 @@ Five members agreeing at 55% and five agreeing at 95% produce **the same tally**
 evidence. The old output could not tell them apart.
 
 ```
-| Confidence — members stating one | 5/5 | 5/5 | |
+| Confidence — members stating one | 4/4 | 4/4 | |
 | Mean confidence                  | 62% | —   | ⚠ agreement at low confidence is a request for more context |
 ```
 
@@ -729,6 +736,9 @@ Five rules, written into every run file:
 | `--timeout=<min>` | per-member budget. Default 15 |
 | `--verify-delivery` | prove with a canary that every member actually receives its prompt |
 | `--allow-uncontained` | include a member measured able to write files. Recorded in the run file |
+| `--local-roster` | use `.council/members.json` from the working directory. Its `contained` flag is **stripped** — a repo does not get to certify itself, so `--allow-uncontained` is needed too |
+| `--peer-review` | run stage 2 in `--rubric` mode as well. Off by default there, because ranking five reviews answers a different question from grading the work |
+| `--card <file>...` | an alias for `--context`, for passing a plan or task card |
 
 Exit codes: **0** usable · **1** convened and nobody answered · **2** could not convene.
 `verify-containment.mjs` uses **3** for "a member can write", so CI can tell that apart.

@@ -8,7 +8,7 @@ Run the council on: **$ARGUMENTS**
 ## Before spending the time
 
 1. **Check it is worth a council.** If the answer is knowable — it is in the code, a test, or a
-   command — say so and stop. Five models guessing costs 10–30 minutes and reads as more
+   command — say so and stop. A council guessing costs 10–30 minutes and reads as more
    authoritative than one `grep`.
 
 2. **Sharpen the question.** A council answers what it is asked. Put the *decision* to them —
@@ -35,7 +35,7 @@ members themselves are buffered and cannot be streamed, so do not promise stream
 
 1. **Read every stage-1 answer before the rankings.** The tally pulls you toward consensus;
    form your own view first or you are synthesising their synthesis.
-2. **Where they disagree is the output.** Record both sides. Averaging five models produces
+2. **Where they disagree is the output.** Record both sides. Averaging the members produces
    something none of them would defend.
 3. **Read the bias diagnostics above the score.** Self-enhancement, verbosity, family mix and
    **reasoning overlap** are printed every run, flagged when present. Overlap is the measured form

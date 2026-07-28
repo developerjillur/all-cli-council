@@ -67,7 +67,7 @@ hung.
 
 ## Do NOT invoke it when
 
-- **The answer is knowable.** It is in the code, a test, a log, or `grep`. Five models guessing
+- **The answer is knowable.** It is in the code, a test, a log, or `grep`. A council guessing
   is slower, worse, and **sounds more authoritative than one command that actually checks.**
 - **The question is a preference.** Naming, formatting, file layout. There is no fact to find.
 - **You are stuck, not uncertain.** A council will not tell you what the user wants.
@@ -106,7 +106,7 @@ your own view first or you are synthesising their synthesis.
 Then three rules, in the order they are usually ignored:
 
 1. **Where they disagree is the output.** Record both sides in the plan or the decision record.
-   Averaging five models produces something none of them would defend.
+   Averaging the members produces something none of them would defend.
 2. **Consensus is not correctness.** They share training data, so agreement measures overlap as
    much as truth. **Check the bias diagnostics printed above the score** — self-enhancement and
    verbosity are flagged when present.

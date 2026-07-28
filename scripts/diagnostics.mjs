@@ -161,19 +161,38 @@ export function parseRanking(text) {
  */
 export function rankedLabels(text) {
   const seen = new Set();
-  // `matchAll` over the whole block, not one match per line.
+  const block = parseRanking(text);
+
+  // ── two bugs, in opposite directions, and the fix has to avoid both ──
   //
-  // The line-by-line version took `.match()[1]` — the FIRST label on each line — so a reviewer that
-  // wrote its ranking inline ("FINAL RANKING: 1. Response C 2. Response A 3. Response B") contributed
-  // exactly one label, `parsed.length < 2`, and was **dropped from the tally entirely** as if it had
-  // refused to rank. A formatting preference silently became a disenfranchisement, and the run file
-  // reported it as "no parseable FINAL RANKING block" — which was true and misleading.
+  // The FIRST version split on newlines and took `.match()[1]` — one label per line. A reviewer that
+  // wrote its ranking inline ("FINAL RANKING: 1. Response C 2. Response A") therefore contributed a
+  // single label, failed `parsed.length < 2`, and was dropped from the tally as though it had refused
+  // to rank. A formatting preference became a disenfranchisement.
   //
-  // Order is preserved because matchAll scans left to right, and lines are still the natural layout;
-  // this only stops depending on them.
-  return [...parseRanking(text).matchAll(/Response\s+([A-Z])\b/gi)]
-    .map((m) => m[1].toUpperCase())
-    .filter((L) => !seen.has(L) && seen.add(L));
+  // The SECOND version took every "Response X" anywhere in the block. That let prose vote: a reviewer
+  // writing "1. Response C\n2. Response A — much weaker than Response C on the retry path" inserted a
+  // second C at position 3. A silent wrong number, in the one place downstream consumers treat as
+  // ground truth.
+  //
+  // So a label only counts when it is **ordinal-anchored**: preceded by a position marker — `1.`,
+  // `2)`, `-`, `*`, `#` — with nothing but whitespace between. That is what a ranking looks like in
+  // every format a model actually emits, inline or one-per-line, and it is not what prose looks like.
+  const ordinal = /(?:^|[\n\r]|\s)(?:\d{1,2}\s*[.)\]:]|[-*•])\s*(?:\*\*)?\s*Response\s+([A-Z])\b/gi;
+  const found = [...block.matchAll(ordinal)].map((m) => m[1].toUpperCase());
+
+  // Fallback: a reviewer that emitted no ordinals at all — "Response C, Response A, Response B" on one
+  // line, say — still meant to rank them, and every label it named is part of that ranking.
+  //
+  // Permissive on purpose, and safe for a specific reason: **the prose problem only arises alongside
+  // ordinals.** A reviewer justifying its choices writes "2. Response A — much weaker than Response C",
+  // which has ordinals, so it takes the strict path and the prose mention is excluded. A block with no
+  // ordinals is a bare list; there is no ranking structure for a stray mention to corrupt.
+  const labels = found.length
+    ? found
+    : [...block.matchAll(/Response\s+([A-Z])\b/gi)].map((m) => m[1].toUpperCase());
+
+  return labels.filter((L) => !seen.has(L) && seen.add(L));
 }
 
 /**

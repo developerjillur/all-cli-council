@@ -104,9 +104,11 @@ if (!Array.isArray(CFG.members) || !CFG.members.length) {
 }
 
 if (usingLocal) {
-  // Stripped before anything reads it, so no later code path can be fooled by a value that came
-  // from the repo. Belt and braces: the field is also absent rather than false, so a future
-  // `m.contained !== false` check cannot accidentally treat it as contained.
+  // Stripped before anything reads it, so no later code path can be fooled by a value that came from
+  // the repo, and then explicitly set to `false` — not left absent. The comment here used to claim it
+  // was left absent, which was wrong in a way that mattered: `false` is what makes it show up in the
+  // `uncontained` list and get NAMED in the output, where an absent field would only have failed the
+  // `=== true` check silently. Fail-closed either way; loud is better.
   CFG.members = CFG.members.map(({ contained, containmentVerified, ...m }) => ({ ...m, contained: false }));
 }
 
@@ -140,7 +142,70 @@ if (spaceForm >= 0) {
   process.exit(1);
 }
 
-const question = argv.filter((a) => !a.startsWith('--') && !ctxFiles.includes(a)).join(' ').trim();
+// ── the entry point is now held to the same standard as everything downstream ──
+//
+// **An unquoted question was a silent wrong answer**, which is the one outcome this project ranks
+// above a crash — and it happened before any of the machinery that guards against it.
+//
+//     node council.mjs Should we use --lenses here?     ← the shell splits this into arguments
+//
+// `--lenses` was stripped from the question AND silently switched the flag on. The council answered a
+// different question from the one asked, in a different mode than the one intended, and reported
+// success. The same shape swallows `--revise`, `--rubric` and `--allow-uncontained`.
+//
+// So every `--`-prefixed token must be a flag this script knows. An unknown one is a typo or a
+// shell-split question, and both deserve a refusal naming the token rather than a run that quietly
+// reinterprets it.
+const KNOWN_FLAGS = new Set(['context', 'card', 'stage1-only', 'revise', 'members', 'lenses', 'rubric',
+  'peer-review', 'events', 'json-events', 'no-live', 'timeout', 'preflight', 'verify-delivery',
+  'allow-uncontained', 'local-roster']);
+const unknownFlag = argv.find((a) => a.startsWith('--')
+  && !KNOWN_FLAGS.has(a.replace(/^--/, '').split('=')[0]));
+if (unknownFlag) {
+  console.error(`\n  Unknown option: ${unknownFlag}`);
+  console.error('  If that was part of your question, QUOTE the question. The shell splits it into');
+  console.error('  arguments, and a flag-shaped word would be stripped from the question and switched');
+  console.error('  on at the same time — a different question, in a different mode, reported as success.');
+  console.error('\n      node scripts/council.mjs "Should we use --lenses here?" --context src/x.js\n');
+  console.error(`  Known options: ${[...KNOWN_FLAGS].map((f) => `--${f}`).join(' ')}\n`);
+  process.exit(1);
+}
+
+const questionTokens = argv.filter((a) => !a.startsWith('--') && !ctxFiles.includes(a));
+const question = questionTokens.join(' ').trim();
+
+// A quoted question is ONE argument. Several bare words mean the shell split it — and if a flag is
+// present as well, the odds are that flag was part of the sentence:
+//
+//     node council.mjs Should we use --lenses here?   ->  question "Should we use here?", --lenses ON
+//
+// which is a different question in a different mode, reported as a success. The unknown-flag guard
+// above cannot catch this one, because `--lenses` is a real flag. Token count can, exactly.
+const anyFlag = argv.some((a) => a.startsWith('--'));
+if (questionTokens.length > 1 && anyFlag) {
+  console.error(`\n  The question arrived as ${questionTokens.length} separate words, so it was not quoted:`);
+  console.error(`      ${questionTokens.map((t) => JSON.stringify(t)).join(' ')}`);
+  console.error('\n  QUOTE it. Unquoted, the shell splits the sentence into arguments — and any');
+  console.error('  flag-shaped word in it is stripped from the question AND switched on, so the council');
+  console.error('  answers a different question in a different mode and reports success.\n');
+  console.error('      node scripts/council.mjs "the whole question here" --context src/x.js\n');
+  process.exit(1);
+}
+
+// `--context` consumes every following non-flag token, so an unquoted question placed after it is
+// swallowed as a list of file paths and the run dies on "no question" with no hint why. A context
+// entry that is not a readable file is almost always exactly that mistake.
+const notFiles = ctxFiles.filter((f) => {
+  try { return !fs.statSync(path.resolve(ROOT, f)).isFile(); } catch { return true; }
+});
+if (notFiles.length) {
+  console.error(`\n  --context was given ${notFiles.length} value(s) that are not readable files:`);
+  for (const f of notFiles.slice(0, 8)) console.error(`      ${f}`);
+  console.error('\n  --context consumes every following word, so an UNQUOTED question after it is');
+  console.error('  swallowed as file paths. Quote the question, and put it first:');
+  console.error('\n      node scripts/council.mjs "the question" --context src/a.js src/b.js\n');
+  process.exit(1);
+}
 const stage1Only = has('stage1-only');
 const useLenses = has('lenses');
 const rubricMode = has('rubric');
@@ -198,9 +263,21 @@ try {
 // directory browsable.
 const SLUG_MAX = 60;
 const bare = question.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-const slug = (bare.length > SLUG_MAX
-  ? `${bare.slice(0, SLUG_MAX).replace(/-$/, '')}-${crypto.createHash('sha256').update(question).digest('hex').slice(0, 6)}`
-  : bare) || 'council';
+const qhash = crypto.createHash('sha256').update(question).digest('hex').slice(0, 6);
+let slug = (bare.length > SLUG_MAX ? `${bare.slice(0, SLUG_MAX).replace(/-$/, '')}-${qhash}` : bare)
+  || 'council';
+
+// A SHORT question can still collide: "Is it safe?" and "Is it safe!" normalise to the same slug, and
+// the second run silently overwrote the first one's record. Only the long case was hashed, on the
+// assumption that truncation was the only way to lose information — normalisation loses it too.
+//
+// Checked rather than hashed unconditionally, so a readable filename stays the common case: the hash
+// is appended only when a DIFFERENT question already owns that name. A re-run of the SAME question
+// still overwrites, which is what a re-run should do.
+try {
+  const prior = JSON.parse(fs.readFileSync(path.join(OUT_DIR, `${slug}.json`), 'utf8'));
+  if (prior.question && prior.question !== question) slug = `${slug}-${qhash}`;
+} catch { /* no prior run under this name, or unreadable — either way keep the clean slug */ }
 
 // ── the event stream, and the live view fed from it ──────────────────────────
 //
@@ -216,7 +293,14 @@ const eventsPath = has('events')
 // found this independently, which is what moved the check into `safe-write.mjs` and put every write
 // through it instead of adding a third patch.
 if (eventsPath) {
-  const w = checkWritable(eventsPath, ROOT);
+  // An EXPLICIT `--events=/tmp/run.ndjson` is operator intent, and refusing it because /tmp is not
+  // inside the workspace was both wrong and wrongly explained — the message said a symlink had
+  // redirected the file. Containment exists to stop a REPO choosing a destination; a person naming one
+  // on the command line is the opposite case. The symlink refusal still applies either way, because
+  // that one protects the operator from something they did not choose.
+  const explicit = Boolean(flag('events'));
+  const boundary = explicit ? path.parse(path.resolve(eventsPath)).root : ROOT;
+  const w = checkWritable(eventsPath, boundary);
   if (!w.ok) {
     console.error(`\n  Refusing to open the event stream: ${w.reason}\n`);
     process.exit(1);
@@ -293,7 +377,12 @@ function resolveCmd(cmd) {
     try { fs.accessSync(f, fs.constants.X_OK); return !fs.statSync(f).isDirectory(); } catch { return false; }
   };
   if (cmd.includes('/')) return runnable(cmd) ? path.resolve(cmd) : null;
-  const onPathDirs = (process.env.PATH ?? '').split(':').filter(Boolean);
+  // Relative PATH entries are legal and `spawn` resolves them against ITS cwd — which is the scratch
+  // directory, not ours. So pre-flight could find `./bin/codex` relative to the repo and the run could
+  // fail to find it at all, which is the pre-flight/spawn divergence this function exists to remove,
+  // surviving in the one case nobody writes down. Skipped rather than guessed at: a relative PATH entry
+  // is rare, and reporting the member as absent is honest.
+  const onPathDirs = (process.env.PATH ?? '').split(':').filter((d) => d && path.isAbsolute(d));
   const extra = [`${os.homedir()}/.local/bin`, `${os.homedir()}/.npm-global/bin`,
     '/usr/local/bin', '/opt/homebrew/bin'];
   for (const d of onPathDirs) {
@@ -381,10 +470,21 @@ if (absent.length) {
 }
 
 if (!members.length) {
-  log(`\n  No council member is available on this machine.`);
-  log(`  Requested: ${requested.map((m) => m.cmd).join(', ')}`);
-  log(`\n  Install one, or run with --members=<id> for those you do have.`);
-  log(`  Nothing was spent and nothing was written.\n`);
+  // Two different reasons, and they need different advice. When every member was filtered out for
+  // being uncontained, `requested` is EMPTY — so this printed "Requested: " with nothing after it and
+  // told the user to install a CLI they already have.
+  if (!requested.length && uncontained.length) {
+    log(`\n  No council member is available: all ${uncontained.length} requested member(s) were excluded`);
+    log(`  because they cannot be prevented from writing files.`);
+    for (const m of uncontained) log(`    🚨 ${m.label}`);
+    log(`\n  Either run \`node scripts/verify-containment.mjs\` to re-check them, or pass`);
+    log(`  --allow-uncontained if you accept the risk. Nothing was spent and nothing was written.\n`);
+  } else {
+    log(`\n  No council member is available on this machine.`);
+    log(`  Requested: ${requested.map((m) => m.cmd).join(', ') || '(none left after filtering)'}`);
+    log(`\n  Install one, or run with --members=<id> for those you do have.`);
+    log(`  Nothing was spent and nothing was written.\n`);
+  }
   ev('run_done', { ok: false, answered: 0, requested: requested.length, file: null, exitCode: 2 });
   emitter.close(); render.finish();
   process.exit(2);   // 2 = could not convene, distinct from 1 = convened and all failed
@@ -393,6 +493,12 @@ if (!members.length) {
 if (has('preflight')) {
   log(`\n  ${members.length}/${requested.length} member(s) available: ${members.map((m) => m.label).join(', ')}`);
   log(`  Prompt delivery: ${members.map((m) => `${m.id}=${deliveryOf(m)}`).join(', ')}`);
+  // The resolved path, printed. `contained: true` in the roster was measured against whatever `codex`
+  // resolved to on the day the verifier ran; if PATH has changed since, the attestation is about a
+  // different file. This does not re-measure — that is verify-containment.mjs's job — but it makes the
+  // gap visible instead of implicit, so the two can be compared by eye.
+  log(`  Resolved to:`);
+  for (const m of members) log(`    ${m.id.padEnd(14)} ${m.resolved}`);
   for (const m of members.filter((x) => x.offPath)) {
     log(`  ⚠ ${m.label} was found in ${m.offPath}, which is NOT on your PATH — \`${m.cmd}\` alone`);
     log(`    would not work in a shell. The council uses the resolved path, so it runs either way.`);
@@ -430,8 +536,11 @@ if (has('preflight')) {
 // that is the entire premise of "no API keys" — so HOME has to stay, and a member can still read
 // `~/.aws/credentials` if it chooses to. That limit is in the README; this closes the part that was
 // gratuitous.
+// NODE_OPTIONS is deliberately NOT here. It was, and it undoes the point: `NODE_OPTIONS=--require`
+// runs arbitrary code inside a member's process before its own permission mode is established, so the
+// one variable that looked harmless was the one that could disable containment from the outside.
 const ENV_ALLOW = ['HOME', 'PATH', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR', 'LANG', 'LC_ALL',
-  'TERM', 'TZ', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_DATA_HOME', 'NODE_OPTIONS'];
+  'TERM', 'TZ', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_DATA_HOME'];
 const memberEnv = Object.fromEntries(
   Object.entries(process.env).filter(([k]) => ENV_ALLOW.includes(k)),
 );
@@ -515,6 +624,9 @@ ticker.unref?.();
  * event loop alive after the promise had already resolved — the council finished and the process sat
  * there. SIGKILL follows, and the child is unref'd so node can exit.
  */
+/** Far past any real answer; reaching it means a member is malfunctioning, not being thorough. */
+const MAX_MEMBER_OUTPUT = 8 * 1024 * 1024;
+
 function ask(member, prompt, { stage = '1', raw = false } = {}) {
   const started = Date.now();
   const timeoutMs = timeoutMin * 60_000;
@@ -532,8 +644,11 @@ function ask(member, prompt, { stage = '1', raw = false } = {}) {
   // touch the prompt. Substituting it afterwards rewrote pack content for the argv member.
   const plan = prepare(member, prompt, scratch, process.platform,
     { timeoutMin: Math.max(1, timeoutMin - 1) });
-  // Tracked for the interrupt path: this file contains the entire context pack.
-  const promptFile = plan.ok ? plan.args.find((a) => a.startsWith(scratch)) : null;
+  // Returned explicitly by prepare(), not recovered by matching an argument prefix. The prefix scan
+  // would also match any ARGUMENT that happened to start with the scratch path — and, more to the
+  // point, it silently found nothing if the path substitution ever changed shape, leaving the file
+  // that holds the entire context pack untracked for the interrupt path.
+  const promptFile = plan.ok ? (plan.promptFile ?? null) : null;
   if (promptFile) promptFiles.add(promptFile);
   ev('member_start', { stage, id: member.id, label: member.label, promptChars: prompt.length, via: plan.via });
 
@@ -542,7 +657,7 @@ function ask(member, prompt, { stage = '1', raw = false } = {}) {
   if (!plan.ok) return Promise.resolve(done(false, plan.reason));
 
   return new Promise((resolve) => {
-    let out = '', err = '', settled = false;
+    let out = '', err = '', settled = false, truncatedOutput = false;
     const state = { member, stage, started, bytes: 0, lastLine: '', pid: null };
     live.set(member.id, state);
 
@@ -586,15 +701,37 @@ function ask(member, prompt, { stage = '1', raw = false } = {}) {
       p.stdin.end(plan.stdin);
     }
 
+    // Bounded, and scanned incrementally.
+    //
+    // Two problems in one line. `out` grew without limit — a member stuck in a loop could exhaust
+    // memory long before the timeout noticed — and `out.split('\n')` re-scanned the WHOLE accumulated
+    // buffer on every chunk, which is quadratic in the size of an answer. On a member producing
+    // megabytes that is a pegged core and a heartbeat arriving late, which is exactly when the
+    // heartbeat matters most.
+    //
+    // The cap is generous: 8 MiB is ~2M tokens, orders of magnitude past any real answer, so reaching
+    // it means a member is malfunctioning rather than being thorough. Truncation is ANNOUNCED inside
+    // the text, for the same reason context.mjs announces it — half an answer, silently, is reasoned
+    // about as confidently as a whole one.
     p.stdout.on('data', (d) => {
-      out += d;
+      if (!truncatedOutput) {
+        if (out.length + d.length > MAX_MEMBER_OUTPUT) {
+          out += String(d).slice(0, Math.max(0, MAX_MEMBER_OUTPUT - out.length))
+            + `\n\n[TRUNCATED — this member produced more than ${MAX_MEMBER_OUTPUT / 1024 / 1024} MiB, `
+            + `far past any real answer. Treat what is above as incomplete.]`;
+          truncatedOutput = true;
+        } else {
+          out += d;
+        }
+      }
       state.bytes = out.length;
-      // The last non-empty line, for the heartbeat. Capped and scrubbed by `redactLine`, because a
-      // child can print anything — including a fragment of the pack it was just handed.
-      const lines = out.split('\n').filter((l) => l.trim());
-      if (lines.length) state.lastLine = redactLine(lines[lines.length - 1]);
+      // Only the newly arrived chunk is scanned, not the whole buffer.
+      const fresh = String(d).split('\n').filter((l) => l.trim());
+      if (fresh.length) state.lastLine = redactLine(fresh[fresh.length - 1]);
     });
-    p.stderr.on('data', (d) => { err += d; });
+    // Capped too. stderr is where a CLI puts progress spinners, and an unbounded one is the same
+    // memory problem with a less interesting cause.
+    p.stderr.on('data', (d) => { if (err.length < 256 * 1024) err += d; });
     p.stdout.on('error', () => {});          // EPIPE if the child dies mid-write
     p.stderr.on('error', () => {});
     p.on('error', (e) => finish(false, `could not start ${member.cmd}: ${e.message}`));
@@ -743,7 +880,7 @@ if (argvOnly.length) {
   // under-states rather than over-states.
   const est2 = est + members.length * 3_000;   // bytes, same basis
   if (est2 > ceiling && est <= ceiling) {
-    log(`             ⚠ stage 1 fits but stage 2 will not (~${est2.toLocaleString()} chars once every`);
+    log(`             ⚠ stage 1 fits but stage 2 will not (~${est2.toLocaleString()} bytes once every`);
     log(`               answer is appended). ${argvOnly.map((m) => m.id).join(', ')} would be refused THEN,`);
     log(`               after stage 1 had already been paid for. Send fewer files, or drop it now.`);
   }
@@ -908,6 +1045,14 @@ if (wantPeerReview) {
 // question means anything.
 const overlapBasis = opinions.filter((o) => o.ok);
 const overlap = reasoningOverlap(overlapBasis.map((o) => ({ id: o.id, text: o.text })), packText);
+// **Two sets, because there are two answers per member under --revise.**
+//
+// `good` becomes the REVISED answers after stage 1b, so a single `confidences` map keyed by member id
+// held revised numbers — and the Stage 1 section, which prints the FIRST answer, labelled it with them.
+// A member that said 60% alone and 85% after seeing the others was shown as 85% confident in the answer
+// it gave at 60%. Three separate rounds of grading named this; it is fixed rather than noted because
+// "the confidence next to this text is not this text's confidence" is a quiet falsehood in the record.
+const firstConfidences = Object.fromEntries(opinions.filter((o) => o.ok).map((o) => [o.id, parseConfidence(o.text)]));
 const confidences = Object.fromEntries(good.map((o) => [o.id, parseConfidence(o.text)]));
 const rubricPerJudge = rubricMode
   ? good.map((o) => ({ id: o.id, label: o.label, ...parseRubric(o.text) }))
@@ -930,8 +1075,8 @@ const file = path.join(OUT_DIR, `${slug}.md`);
 const byId = Object.fromEntries(good.map((o) => [o.id, o.label]));
 
 const pct = (x) => `${Math.round(100 * x)}%`;
-const confLine = (id) => {
-  const c = confidences[id];
+const confLine = (id, from = confidences) => {
+  const c = from[id];
   if (!c || c.confidence === null) return '_did not state a confidence_';
   return `**${c.confidence}%**${c.changeMind ? ` — would change its mind if: ${c.changeMind}` : ''}`;
 };
@@ -1087,7 +1232,7 @@ const md = [
   ``,
   ...opinions.flatMap((o) => [
     `### ${o.label}${o.ok ? '' : ' — FAILED'}${useLenses && lenses[o.id] ? ` · ${lenses[o.id].name}` : ''}`, ``,
-    `*${Math.round(o.ms / 1000)}s · confidence ${o.ok ? confLine(o.id) : 'n/a'}*`, ``,
+    `*${Math.round(o.ms / 1000)}s · confidence ${o.ok ? confLine(o.id, firstConfidences) : 'n/a'}*`, ``,
     // Redacted here too. The event stream's failure reason was fixed and this was not, so the
     // durable file kept the unredacted copy — the worse of the two places for it to live.
     o.ok ? o.text : `> ${redactLine(o.text.split('\n')[0], 300)}`, ``, `---`, ``,
@@ -1102,6 +1247,7 @@ const md = [
     ...revised.flatMap((o) => [
       `### ${o.label}${o.revisionFailed ? ' — REVISION FAILED, first answer shown' : ''}`, ``,
       ...(o.revisionFailed ? [`> Could not revise: ${o.revisionFailed.split('\n')[0].slice(0, 120)}`, ``] : []),
+      `*confidence ${confLine(o.id)}*`, ``,
       o.text, ``, `---`, ``,
     ]),
   ] : []),
@@ -1174,7 +1320,11 @@ const jsonWritten = safeWrite(jsonFile, `${JSON.stringify({
     briefRefused: brief.refused ?? null, verifiedObedientTokens: VERIFIED_OBEDIENT_TOKENS },
   roster: { path: rosterPath, local: usingLocal, localIgnored: localRosterIgnored },
   members: requested.map((m) => ({ id: m.id, label: m.label, family: m.family ?? 'unknown', via: deliveryOf(m), present: members.includes(m) })),
-  opinions: opinions.map((o) => ({ id: o.id, ok: o.ok, ms: o.ms, chars: o.text.length, lens: lenses[o.id]?.id ?? null, ...confidences[o.id] })),
+  // The first answer's own confidence, not the revised one. `revised` below carries that.
+  opinions: opinions.map((o) => ({ id: o.id, ok: o.ok, ms: o.ms, chars: o.text.length,
+    lens: lenses[o.id]?.id ?? null, ...(firstConfidences[o.id] ?? {}) })),
+  revised: revised ? revised.map((o) => ({ id: o.id, ok: o.ok, ms: o.ms, chars: o.text.length,
+    revisionFailed: o.revisionFailed ? true : false, ...(confidences[o.id] ?? {}) })) : null,
   reviews: reviews.map((r) => ({ id: r.id, ok: r.ok, ms: r.ms, parsed: r.parsed, minority: r.minority ?? null, lost: r.lost ?? null })),
   tally, overlap, rubric: rubricAgg, rubricPerJudge,
 }, null, 2)}\n`, ROOT);
@@ -1219,7 +1369,10 @@ if (good.length < 2) {
 }
 
 log(`\n▸ Written: ${path.relative(ROOT, file)}`);
-log(`           ${path.relative(ROOT, jsonFile)}`);
+// Only if it actually was. The JSON write's failure was logged and then the summary listed the file
+// anyway, so a reader was told a path existed that did not.
+if (jsonWritten.ok) log(`           ${path.relative(ROOT, jsonFile)}`);
+else log(`           (the JSON sibling was NOT written — see the warning above)`);
 if (eventsPath) log(`           ${path.relative(ROOT, eventsPath)}`);
 log('');
 

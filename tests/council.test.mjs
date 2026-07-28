@@ -983,7 +983,7 @@ console.log('\n▸ Round two — the council scored 6.5/10 and named these');
 
     // The events stream must be checked BEFORE it is opened, not after the run.
     const src = fs.readFileSync(path.join(ROOT, 'scripts', 'council.mjs'), 'utf8');
-    const checkIdx = src.indexOf('checkWritable(eventsPath, ROOT)');
+    const checkIdx = src.indexOf('checkWritable(eventsPath, boundary)');
     const openIdx = src.indexOf('const emitter = createEmitter(');
     check('the event stream is checked before the emitter opens it',
       checkIdx > 0 && checkIdx < openIdx, `check at ${checkIdx}, open at ${openIdx}`);
@@ -1419,6 +1419,152 @@ console.log('\n▸ Round four — 7.0/10 (range 5.5–7.8), and one finding was 
   // WAS OPEN: overlap computed over a subset said so only in the JSON sibling, not where the number is.
   check('the report discloses when overlap used a subset of members',
     /Overlap basis/.test(fs.readFileSync(path.join(ROOT, 'scripts', 'council.mjs'), 'utf8')));
+}
+
+// ── round five: 7.3/10 ───────────────────────────────────────────────────────
+console.log('\n▸ Round five — 7.3/10, and the entry point was the last silent-wrong-answer path');
+{
+  // WAS OPEN, and it was the one outcome this project ranks above a crash — reached before any of the
+  // machinery that guards against it. An unquoted question containing a flag-shaped word had that word
+  // stripped from the question AND the flag switched on: a different question, in a different mode,
+  // reported as success.
+  {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'council-argv-'));
+    const cli = path.join(ROOT, 'scripts', 'council.mjs');
+    const run = (args) => spawnSync('node', [cli, ...args], { encoding: 'utf8', timeout: 40_000, cwd: dir });
+
+    const split = run(['Should', 'we', 'use', '--lenses', 'here?', '--preflight']);
+    check('an unknown flag-shaped word is refused, not absorbed', split.status === 1, `exit ${split.status}`);
+    // The guard that fires is the token-count one, not the unknown-flag one — `--lenses` IS a real
+    // flag, which is exactly why unknown-flag detection could never catch this case.
+    check('...and the refusal shows the words it received',
+      /separate words, so it was not quoted/.test(split.stderr ?? ''));
+    check('...and tells the user to quote the question', /QUOTE it/.test(split.stderr ?? ''));
+    check('...and names the real consequence',
+      /different question in a different mode/.test(split.stderr ?? ''),
+      'a wrong answer reported as success is the outcome this project ranks worst');
+    check('a genuinely unknown flag is refused too', run(['q', '--nope', '--preflight']).status === 1);
+    check('...while every real flag still works', run(['q', '--preflight', '--lenses', '--rubric', '--no-live']).status === 0);
+
+    // --context swallows every following word, so an unquoted question after it becomes file paths.
+    const swallowed = run(['--context', 'README.md', 'and', 'is', 'this', 'safe']);
+    check('non-file --context values are refused with the reason', swallowed.status === 1
+      && /not readable files/.test(swallowed.stderr ?? ''), `exit ${swallowed.status}`);
+    check('...and it explains the unquoted-question trap', /UNQUOTED question after it/.test(swallowed.stderr ?? ''));
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+
+  // WAS OPEN in both directions. Per-line matching dropped an inline ranking entirely; matching
+  // everywhere let a label named in JUSTIFICATION PROSE vote at the wrong position.
+  {
+    const cases = [
+      ['prose cannot vote', 'FINAL RANKING:\n1. Response C\n2. Response A — much weaker than Response C here', 'CA'],
+      ['inline ordinals work', 'FINAL RANKING: 1. Response C 2. Response A 3. Response B', 'CAB'],
+      ['dashes work', 'FINAL RANKING:\n- Response B\n- Response A', 'BA'],
+      ['parenthesised ordinals work', 'FINAL RANKING:\n1) Response A\n2) Response C', 'AC'],
+      ['bold labels work', 'FINAL RANKING:\n1. **Response D**\n2. **Response A**', 'DA'],
+      ['a bare comma list still counts', 'FINAL RANKING: Response A, Response B', 'AB'],
+      ['duplicates collapse', 'FINAL RANKING:\n1. Response A\n2. Response A\n3. Response B', 'AB'],
+    ];
+    for (const [name, text, want] of cases) {
+      check(`rankedLabels: ${name}`, rankedLabels(text).join('') === want,
+        `${rankedLabels(text).join('') || '(none)'} — want ${want}`);
+    }
+  }
+
+  // WAS OPEN: the terse tier was anchored but could not separate "429 Too Many Requests" from
+  // "429 responses should be retried off the hot path." — identical words, both short. Sentence
+  // structure is what distinguishes them.
+  for (const [what, text, want] of [
+    ['429 opening real prose', '429 responses should be retried off the hot path in this design.', true],
+    ['unauthorized in prose', 'Unauthorized cache access is the real risk in this whole design, honestly.', true],
+    ['a bare 429 status', '429 Too Many Requests', false],
+    ['HTTP 429', 'HTTP 429', false],
+    ['Unauthorized alone', 'Unauthorized', false],
+    ['Error 429 from upstream', 'Error 429 Too Many Requests from upstream', false],
+  ]) check(`a status line is told from prose: ${what}`, judgeOutput(text, '', 0)[0] === want);
+
+  check('a refusal reason quotes the line that MATCHED, not line 1',
+    /Rate limit exceeded/.test(judgeOutput('codex v1.2\nRate limit exceeded', '', 0)[1]),
+    'a banner line made the reason read as a bug in the guard');
+
+  // WAS OPEN: readFileSync on a FIFO blocks forever, before any member has started — so before any
+  // timeout exists to end it. The council would hang with no output at all.
+  {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'council-fifo-'));
+    try {
+      spawnSync('mkfifo', [path.join(dir, 'pipe.md')], { timeout: 10_000 });
+      if (fs.existsSync(path.join(dir, 'pipe.md'))) {
+        const r = readForContext(path.join(dir, 'pipe.md'), dir);
+        check('a FIFO passed as context is refused, not read', !!r.skipped);
+        check('...and the reason says it would block forever', /block the read forever/.test(r.skipped ?? ''));
+      }
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  }
+
+  // WAS OPEN: the event stream was the third output file and the only one still opened with a plain
+  // 'w' — so the check/open race safe-write closes for the .md and .json stayed open for the file that
+  // exists longest.
+  check('the event stream is opened with O_NOFOLLOW too',
+    /O_NOFOLLOW/.test(fs.readFileSync(path.join(ROOT, 'scripts', 'events.mjs'), 'utf8')));
+
+  // WAS OPEN: NODE_OPTIONS=--require runs arbitrary code inside a member before its own permission
+  // mode is established, so the one variable that looked harmless could disable containment.
+  {
+    const allow = fs.readFileSync(path.join(ROOT, 'scripts', 'council.mjs'), 'utf8')
+      .match(/const ENV_ALLOW = \[[\s\S]*?\];/)?.[0] ?? '';
+    check('NODE_OPTIONS is not in the environment allowlist', !/NODE_OPTIONS/.test(allow),
+      'it can inject --require into a member before its permission mode exists');
+  }
+
+  // WAS OPEN and named in THREE consecutive rounds: `good` becomes the revised answers after stage 1b,
+  // so the Stage 1 section printed the FIRST answer labelled with the REVISED confidence.
+  {
+    const src = fs.readFileSync(path.join(ROOT, 'scripts', 'council.mjs'), 'utf8');
+    check('the first answer carries the FIRST answer\'s confidence',
+      /const firstConfidences = Object\.fromEntries\(opinions/.test(src));
+    check('...and the Stage 1 section uses it', /confLine\(o\.id, firstConfidences\)/.test(src));
+    check('...and the JSON sibling separates the two', /revised: revised \? revised\.map/.test(src));
+  }
+
+  // WAS OPEN: a CLI that echoes its prompt before answering satisfied the canary on the token alone,
+  // certifying delivery for a member that then said nothing.
+  {
+    const c = canary();
+    check('a real reply satisfies the canary', c.arrived(`Received. ${c.token}`));
+    check('a pure echo of the probe does NOT', !c.arrived(c.prompt),
+      'an echo contains the token, so the token alone cannot prove delivery');
+    check('an echo followed by a real reply still counts',
+      c.arrived(`${c.prompt}\n\nSure — ${c.token}`));
+  }
+
+  // WAS OPEN: a relative PATH entry is legal and `spawn` resolves it against ITS cwd — the scratch
+  // directory — so pre-flight and the run could disagree in the one case nobody writes down.
+  check('relative PATH entries are skipped rather than resolved differently',
+    /path\.isAbsolute\(d\)/.test(fs.readFileSync(path.join(ROOT, 'scripts', 'council.mjs'), 'utf8')));
+
+  // WAS OPEN: the JSON write's failure was logged and the summary then listed the file anyway.
+  check('a failed JSON write is not then reported as written',
+    /if \(jsonWritten\.ok\) log/.test(fs.readFileSync(path.join(ROOT, 'scripts', 'council.mjs'), 'utf8')));
+
+  // WAS OPEN: two SHORT questions normalising to the same slug silently overwrote each other. Only
+  // the truncated case was hashed, on the assumption that truncation was the only way to lose
+  // information — normalisation loses it too.
+  check('a slug collision below the truncation limit is detected',
+    /if \(prior\.question && prior\.question !== question\)/.test(fs.readFileSync(path.join(ROOT, 'scripts', 'council.mjs'), 'utf8')));
+
+  // WAS OPEN: an explicit --events=/tmp/x.ndjson was refused because /tmp is outside the workspace,
+  // and the message blamed a symlink. Containment stops a REPO choosing a destination; a person
+  // naming one on the command line is the opposite case.
+  {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'council-ev2-'));
+    const target = path.join(dir, 'explicit.ndjson');
+    const r = spawnSync('node', [path.join(ROOT, 'scripts', 'council.mjs'), 'q', '--preflight', `--events=${target}`],
+      { encoding: 'utf8', timeout: 40_000, cwd: ROOT });
+    check('an explicit --events path outside the workspace is honoured', r.status === 0, `exit ${r.status}`);
+    check('...and the stream is written there', fs.existsSync(target));
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 // ── the CLI actually runs, end to end, with the flags it documents ───────────

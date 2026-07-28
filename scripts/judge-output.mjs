@@ -47,10 +47,35 @@ export const UNAMBIGUOUS = [
  * them is **length** — a CLI status message is terse by nature, an answer is not.
  */
 const STATUS_LINE_MAX = 100;
+
+/**
+ * A line that is a machine's STATUS, rather than the opening of a sentence.
+ *
+ * Anchoring these to the start of the line was not enough, and it is worth being precise about why.
+ * `429 Too Many Requests` and `429 responses should be retried off the hot path in this design.` both
+ * begin with the token; both are under `STATUS_LINE_MAX`. Position cannot separate them and neither
+ * can vocabulary — the whole difficulty is that the words are identical.
+ *
+ * **Sentence structure can.** A status message is a label: a handful of words, no terminal
+ * punctuation. An answer is prose: it runs on, and it ends with a full stop. So the terse patterns
+ * only apply to a line that looks like a label, and every real answer tested against this — including
+ * the ones that open with `429`, `Unauthorized` or `Error` — is released.
+ */
+function looksLikeStatusLine(line) {
+  const t = line.trim();
+  if (!t || t.length > STATUS_LINE_MAX) return false;
+  if (/[.?!]$/.test(t)) return false;              // prose ends; a label does not
+  return t.split(/\s+/).length <= 8;               // a label is short in WORDS, not only in characters
+}
+
 export const FIRST_LINE_ONLY = [
-  /\b429\b/,
-  /\btoo many requests\b/i,
-  /\bunauthorized\b/i,
+  // Anchored to the START of the line as well, because a 429 mentioned mid-sentence is discussion.
+  // These three were left unanchored when `error:` and the 429-in-prose case were fixed — the same bug
+  // class, closed for one instance and left open for the others.
+  /^\s*(HTTP\s*)?429\b/,
+  /^\s*(error|warn)?[:\s]*\b429\b/i,
+  /^\s*\btoo many requests\b/i,
+  /^\s*\bunauthorized\b/i,
   // WAS A FALSE POSITIVE, and it discarded real answers silently — the exact cost this file's own
   // header warns is worse than the thing being guarded against.
   //
@@ -104,9 +129,14 @@ export function judgeOutput(out, err, code) {
   const statusish = topLines.filter((l) => l.trim().length <= STATUS_LINE_MAX);
   const firstLine = lines[0];
   const refusal = statusish.some((l) => UNAMBIGUOUS.some((re) => re.test(l)))
-    || (firstLine.length <= STATUS_LINE_MAX && FIRST_LINE_ONLY.some((re) => re.test(firstLine)));
+    || (looksLikeStatusLine(firstLine) && FIRST_LINE_ONLY.some((re) => re.test(firstLine)));
   if (refusal) {
-    return [false, `refused: the CLI reported a limit or auth failure — "${firstLine.slice(0, 90)}"`];
+    // The line that actually MATCHED, not line 1. A CLI printing a banner first — "codex v1.2" —
+    // produced `refused: ... — "codex v1.2"`, which names the wrong line and reads as a bug in the
+    // guard rather than a quota message. The reason string is the only trace of why an answer was
+    // dropped, so it has to point at the evidence.
+    const matched = statusish.find((l) => UNAMBIGUOUS.some((re) => re.test(l))) ?? firstLine;
+    return [false, `refused: the CLI reported a limit or auth failure — "${matched.trim().slice(0, 90)}"`];
   }
 
   // WAS OPEN: stderr was consulted ONLY when stdout was empty. A CLI that prints a partial answer to

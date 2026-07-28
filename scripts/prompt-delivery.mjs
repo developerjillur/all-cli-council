@@ -145,6 +145,9 @@ export function prepare(member, prompt, scratch, platform = process.platform, su
     }
     return {
       ok: true, via, exposed: false, stdin: null,
+      // Returned rather than left for the caller to find by scanning args for a prefix. This file
+      // holds the entire context pack; the interrupt handler must not have to guess its name.
+      promptFile: f,
       // A replacer function, never a replacement string: `String.replace` expands `$&`, `` $` ``,
       // `$'` and `$1` in a string replacement, and these prompts are full of source code.
       args: args.map((a) => a.replace('{promptFile}', () => f)),
@@ -228,7 +231,25 @@ export function canary() {
      * A member whose prompt never arrived answers *something* — a greeting, an offer to help.
      * Only the token proves the bytes got there.
      */
-    arrived: (out) => String(out ?? '').includes(token),
+    /**
+     * The token must come back **without** the sentence that asked for it.
+     *
+     * Some CLIs echo their prompt before answering — and an echo contains the token, so it certified
+     * delivery for a member that then said nothing at all. The probe cannot tell "it received this and
+     * replied" from "it printed back what it was given" on the token alone.
+     *
+     * The distinctive sentence is the tell: a reply that contains BOTH the token and the request for it
+     * is an echo of the prompt; a reply that contains the token and not the request is an answer. And
+     * if a member echoes the prompt and then also answers, the token still appears outside the echoed
+     * block, so stripping the echo first is what makes both cases work.
+     */
+    arrived: (out) => {
+      const s = String(out ?? '');
+      if (!s.includes(token)) return false;
+      // Remove any echoed copy of the probe, then look again.
+      const withoutEcho = s.split('One short line is plenty.').pop() ?? s;
+      return withoutEcho.includes(token) || !s.includes('delivery self-test');
+    },
     /**
      * "It refused" and "it never got the prompt" need different remedies, and reporting the first as
      * the second sends someone to edit a `promptVia` that was correct.

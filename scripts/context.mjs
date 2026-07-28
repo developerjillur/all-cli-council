@@ -15,6 +15,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { isInside } from './safe-write.mjs';
 
 /** Never included, whatever is asked for. Checked against the resolved absolute path. */
 const REFUSE = [
@@ -117,7 +118,7 @@ export function readForContext(file, root) {
     .map((r) => { try { return fs.realpathSync(r); } catch { return null; } })
     .filter(Boolean);
   const realRoot = roots[0] ?? path.resolve(root);
-  const inside = roots.some((r) => real === r || real.startsWith(r + path.sep));
+  const inside = roots.some((r) => isInside(real, r));
   if (!inside) {
     return { path: rel, skipped: `refused — resolves to ${real}, outside the workspace` };
   }
@@ -134,8 +135,17 @@ export function readForContext(file, root) {
   if (REFUSE.some((re) => re.test(realRel))) {
     return { path: rel, skipped: 'refused — matches a credential or private-data path' };
   }
-  if (!fs.existsSync(real) || fs.statSync(real).isDirectory()) {
-    return { path: rel, skipped: 'not a file' };
+  // A REGULAR file specifically. `isDirectory()` was the only exclusion, so a FIFO passed the check
+  // and `readFileSync` on a FIFO **blocks forever** — before any member has started, therefore before
+  // any timeout exists to end it. The council would hang with no output at all, which is the one
+  // behaviour this package spends a whole section promising cannot happen.
+  let st;
+  try { st = fs.statSync(real); } catch { return { path: rel, skipped: 'not a file' }; }
+  if (!st.isFile()) {
+    return { path: rel, skipped: st.isDirectory()
+      ? 'not a file — it is a directory'
+      : 'refused — not a regular file. A FIFO, socket or device would block the read forever, before '
+        + 'any member timeout exists to end it' };
   }
 
   let text = fs.readFileSync(real, 'utf8');
@@ -234,7 +244,7 @@ export function loadBrief(root) {
       // the automatic channel bypassing the containment the deliberate channel enforces.
       const real = fs.realpathSync(f);
       const rootReal = (() => { try { return fs.realpathSync(root); } catch { return path.resolve(root); } })();
-      if (!(real === rootReal || real.startsWith(rootReal + path.sep))) {
+      if (!isInside(real, rootReal)) {
         return {
           text: briefMissing(`\`${rel}\` was found but **refused: it resolves to ${real}**, outside the `
             + `workspace. A brief is read automatically and prepended to every prompt, so a symlink `

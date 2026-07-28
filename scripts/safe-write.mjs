@@ -43,6 +43,21 @@ function realExistingAncestor(p) {
 }
 
 /**
+ * Is `child` at or beneath `parent`, both already resolved?
+ *
+ * **The separator has to be appended conditionally**, and this was a real bug. The obvious form —
+ * `child.startsWith(parent + path.sep)` — produces `'//'` when the parent is the filesystem root, and
+ * nothing starts with `'//'`. So every containment check against `/` failed closed, which is how an
+ * explicitly requested `--events=/tmp/run.ndjson` came to be refused with a message about symlinked
+ * parent directories. Exported so `context.mjs` cannot grow its own copy with the same flaw.
+ */
+export function isInside(child, parent) {
+  if (child === parent) return true;
+  const prefix = parent.endsWith(path.sep) ? parent : parent + path.sep;
+  return child.startsWith(prefix);
+}
+
+/**
  * Is `target` a safe place for this package to write, given a workspace `root`?
  *
  * @returns {{ok: true, path: string} | {ok: false, reason: string}}
@@ -65,7 +80,7 @@ export function checkWritable(target, root) {
   // And the resolved DIRECTORY must be inside the workspace. This is the half the leaf check missed.
   const rootReal = (() => { try { return fs.realpathSync(root); } catch { return path.resolve(root); } })();
   const { real, checked } = realExistingAncestor(path.dirname(abs));
-  const inside = real === rootReal || real.startsWith(rootReal + path.sep);
+  const inside = isInside(real, rootReal);
   if (!inside) {
     return { ok: false, reason: `${path.relative(root, abs)} would be written outside the workspace: `
       + `\`${path.relative(root, checked) || checked}\` resolves to ${real}. Refusing — a symlinked `

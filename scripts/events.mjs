@@ -119,7 +119,11 @@ export function createEmitter({ file = null, toFd = null } = {}) {
       // `reduce()` folds them into one incoherent state, because a stream is defined as one run from
       // start to finish. Truncating also gives a watcher a clean signal: `watch.mjs` sees the file
       // shrink below its read offset and starts over, which is exactly right for a new run.
-      fd = fs.openSync(file, 'w');
+      // O_NOFOLLOW, matching safe-write.mjs. This was the third output file and the only one still
+      // opened with a plain 'w' — so the check/open race that safe-write closes for the .md and the
+      // .json stayed open for the stream, which is also the file that exists longest.
+      fd = fs.openSync(file, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC
+        | (fs.constants.O_NOFOLLOW ?? 0), 0o644);
     } catch (e) { broken = e.message; }
   }
 

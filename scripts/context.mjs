@@ -116,13 +116,22 @@ export function readForContext(file, root) {
   const roots = [root, ...extra]
     .map((r) => { try { return fs.realpathSync(r); } catch { return null; } })
     .filter(Boolean);
+  const realRoot = roots[0] ?? path.resolve(root);
   const inside = roots.some((r) => real === r || real.startsWith(r + path.sep));
   if (!inside) {
     return { path: rel, skipped: `refused — resolves to ${real}, outside the workspace` };
   }
 
-  // Patterns are checked against the resolved path, so a symlink cannot launder a name.
-  if (REFUSE.some((re) => re.test(real))) {
+  // Patterns are checked against the resolved path RELATIVE TO THE WORKSPACE, so a symlink cannot
+  // launder a name — and a workspace that merely happens to LIVE somewhere unfortunate is not
+  // punished for it.
+  //
+  // They used to be tested against the absolute path. `/(^|\/)data\//` therefore matched every file
+  // in a project checked out at, say, `/Volumes/data/myrepo` — the entire context pack refused as "a
+  // credential or private-data path", for a reason the message never explains. The patterns describe
+  // paths WITHIN a project; matching them against the machine's directory layout was a category error.
+  const realRel = path.relative(realRoot, real);
+  if (REFUSE.some((re) => re.test(realRel))) {
     return { path: rel, skipped: 'refused — matches a credential or private-data path' };
   }
   if (!fs.existsSync(real) || fs.statSync(real).isDirectory()) {
@@ -232,6 +241,21 @@ export function loadBrief(root) {
             + `there would send an arbitrary file to every vendor.`),
           source: null,
           refused: `${rel} — refused, resolves outside the workspace (${real})`,
+        };
+      }
+
+      // Containment was not enough on its own. A symlink named `AGENTS.md` pointing at `.env` in the
+      // SAME repository resolves inside the workspace and passed every check — so the one file class
+      // the pack refuses by name was reachable through the channel that is read automatically. The
+      // brief now runs the same path denylist as any --context file.
+      const briefRel = path.relative(rootReal, real);
+      if (REFUSE.some((re) => re.test(briefRel))) {
+        return {
+          text: briefMissing(`\`${rel}\` was found but **refused: it resolves to \`${briefRel}\`**, which `
+            + `matches a credential or private-data path. A brief is read automatically and sent to every `
+            + `vendor on every call, so a symlink there is the cheapest way to exfiltrate a secret.`),
+          source: null,
+          refused: `${rel} — refused, resolves to ${briefRel}, a credential or private-data path`,
         };
       }
 

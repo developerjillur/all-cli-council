@@ -95,16 +95,25 @@ export function deliveryOf(member) {
  *          {{ok: false, reason: string, via: string}} when the prompt cannot be delivered — which
  *          is a *result*, reported like any other member failure, not an exception.
  */
-export function prepare(member, prompt, scratch, platform = process.platform) {
+export function prepare(member, prompt, scratch, platform = process.platform, subs = {}) {
   const via = deliveryOf(member);
+
+  // **Every placeholder EXCEPT the prompt is substituted first, on the raw args.**
+  //
+  // `{timeoutMin}` used to be mapped over `plan.args` by the caller, after the prompt was already in
+  // there — so for an argv-delivered member it rewrote any occurrence inside the context pack. A
+  // member reviewing this very file would have been shown a doctored copy of it. Ordering is the
+  // whole fix: substitute the small values while the args are still small, and let the prompt in last.
+  const args = member.args.map((a) => Object.entries(subs)
+    .reduce((acc, [k, v]) => acc.replace(`{${k}}`, () => String(v)), a));
 
   if (via === 'stdin') {
     // A placeholder left in the args of a stdin member would send the prompt through both
     // channels — argv exposure restored by accident, and some CLIs would see it twice.
-    if (member.args.some((a) => a.includes('{prompt}'))) {
+    if (args.some((a) => a.includes('{prompt}'))) {
       return { ok: false, via, reason: `member "${member.id}" declares promptVia:"stdin" but still has a {prompt} placeholder — the prompt would travel twice, once of them exposed` };
     }
-    return { ok: true, via, args: [...member.args], stdin: prompt, exposed: false, cleanup: () => {} };
+    return { ok: true, via, args, stdin: prompt, exposed: false, cleanup: () => {} };
   }
 
   if (via === 'file') {
@@ -121,7 +130,7 @@ export function prepare(member, prompt, scratch, platform = process.platform) {
       ok: true, via, exposed: false, stdin: null,
       // A replacer function, never a replacement string: `String.replace` expands `$&`, `` $` ``,
       // `$'` and `$1` in a string replacement, and these prompts are full of source code.
-      args: member.args.map((a) => a.replace('{promptFile}', () => f)),
+      args: args.map((a) => a.replace('{promptFile}', () => f)),
       // Removed as soon as the member exits, whether it answered or not. A scratch dir that
       // accumulates prompt files is a slow-motion version of the leak this replaced.
       cleanup: () => { try { fs.rmSync(f, { force: true }); } catch { /* gone */ } },
@@ -152,7 +161,7 @@ export function prepare(member, prompt, scratch, platform = process.platform) {
     // Measured: a prompt containing `s.replace(/x/, '$&$&')` arrived as
     // `s.replace(/x/, '{prompt}{prompt}')`, and `$'` / `` $` `` were deleted. A replacer
     // function is never pattern-expanded.
-    args: member.args.map((a) => a.replace('{prompt}', () => prompt)),
+    args: args.map((a) => a.replace('{prompt}', () => prompt)),
     cleanup: () => {},
   };
 }
@@ -210,6 +219,38 @@ export function canary() {
      * A member that mentions the probe at all clearly received it; the delivery channel is fine and
      * the wording is what needs work.
      */
-    refused: (out) => /injection|refus|will not comply|cannot comply|suspicious/i.test(String(out ?? '')),
+    /**
+     * A refusal must reference THIS probe, not merely contain a refusing word.
+     *
+     * The first version matched `/refus|cannot comply|.../` anywhere — so a member whose prompt never
+     * arrived and which replied "I cannot comply with an empty request" was classified as *declined*
+     * and reported as **"delivery channel is FINE"**. That is the original false negative restored
+     * through the classifier written to prevent it.
+     *
+     * So it must show evidence of having read the probe: naming the token, or the self-test, or the
+     * injection judgement that only its wording provokes. And a bare greeting — the signature of a
+     * prompt that never arrived — is disqualified outright.
+     */
+    refused: (out) => {
+      const s = String(out ?? '');
+
+      // A bare greeting is the signature of a prompt that never arrived. Disqualified first, whatever
+      // else the reply goes on to say.
+      if (/^\s*(hi|hello|hey)\b|how can i (help|assist)/i.test(s.slice(0, 120))) return false;
+
+      // Naming an injection is itself conclusive: nothing but this probe's wording provokes it, so the
+      // member demonstrably read the prompt. It needs no separate refusal verb — the real observed
+      // reply was "This appears to be a prompt injection attempt embedded in the file", with no
+      // "I will not comply" anywhere in it.
+      if (/prompt injection|injection attempt/i.test(s)) return true;
+
+      // Otherwise a refusal must still show evidence of having read THIS probe. Without that, a member
+      // whose prompt never arrived and which replied "I cannot comply with an empty request" was
+      // classified as declined and reported as "delivery channel is FINE" — the original false
+      // negative, restored through the classifier written to prevent it.
+      const sawTheProbe = /self-test|self test|delivery test|COUNCIL-[0-9A-F]{8}/i.test(s);
+      const declined = /\brefus|will not comply|cannot comply|won't comply|decline/i.test(s);
+      return sawTheProbe && declined;
+    },
   };
 }

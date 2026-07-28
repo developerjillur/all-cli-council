@@ -29,8 +29,13 @@ export const UNAMBIGUOUS = [
   /\byou(?:'?ve| have| are) (?:hit|reached|out of) .{0,24}\blimit\b/i,
   /\b(usage|rate|quota|token) limit\b.{0,40}\b(reset|resets|try again)\b/i,
   /\b(insufficient (credit|quota)|billing[_ ]not[_ ]active|payment required)\b/i,
-  /\bauthentication (failed|error)\b/i,
-  /\b(not logged in|please (log ?in|sign ?in))\b/i,
+  // Anchored to a LINE START, not "anywhere in the first 400 characters". A real answer that
+  // discusses auth — "authentication failed should surface as a filler rather than silence" — was
+  // being discarded, which is the same false positive the terse tier exists to avoid and the same
+  // cost this file's header calls worse than the failure it guards against. A CLI announces an auth
+  // failure at the start of a line; an essay mentions it mid-sentence.
+  /^[^\S\n]*\S{0,20}\bauthentication (failed|error)\b/im,
+  /^[^\S\n]*\S{0,20}\b(not logged in|please (log ?in|sign ?in))\b/im,
   /\bmodel\b.{0,40}\b(not found|unavailable|not supported)\b/i,
 ];
 

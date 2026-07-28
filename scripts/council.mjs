@@ -127,7 +127,11 @@ for (let i = 0; i < argv.length; i++) {
 // `=`-style flags given with a SPACE used to have their value swallowed into the question:
 // `--members codex` produced a member filter of undefined and a question ending in "codex". Silent,
 // and it changes both the roster and the question at once. Refused with the correct form instead.
-const EQ_FLAGS = ['members', 'timeout', 'events'];
+// `--events` is legitimately BARE (it defaults to a path derived from the slug), so including it
+// here refused `--events "the question"` and told the user to write `--events=the question` — an
+// error message instructing them to do something wrong. Only flags that are meaningless without a
+// value belong in this list.
+const EQ_FLAGS = ['members', 'timeout'];
 const spaceForm = argv.findIndex((a, i) => EQ_FLAGS.includes(a.replace(/^--/, ''))
   && a.startsWith('--') && argv[i + 1] && !argv[i + 1].startsWith('--'));
 if (spaceForm >= 0) {
@@ -219,7 +223,10 @@ const log = (s) => render.note(s);
 /** Emit, and let the live view react to the same event. Nothing bypasses this. */
 const ev = (name, data) => { emitter.emit(name, data); render.handle({ ev: name, ...data }); };
 
-if (eventsPath && emitter.broken) {
+// Both sinks, not just the file one. events.mjs was taught to detect an unopenable fd 3 and this
+// guard still only asked about `eventsPath` — so the comment there claiming the asymmetry was fixed
+// was itself the remaining half of the bug.
+if ((eventsPath || has('json-events')) && emitter.broken) {
   // Asked for and not delivered is a failure, not a detail. A UI waiting on a file that will never
   // appear looks exactly like a council that hung.
   console.error(`\n  --events was requested but the stream could not be opened: ${emitter.broken}\n`);
@@ -374,6 +381,10 @@ if (!members.length) {
 if (has('preflight')) {
   log(`\n  ${members.length}/${requested.length} member(s) available: ${members.map((m) => m.label).join(', ')}`);
   log(`  Prompt delivery: ${members.map((m) => `${m.id}=${deliveryOf(m)}`).join(', ')}`);
+  for (const m of members.filter((x) => x.offPath)) {
+    log(`  ⚠ ${m.label} was found in ${m.offPath}, which is NOT on your PATH — \`${m.cmd}\` alone`);
+    log(`    would not work in a shell. The council uses the resolved path, so it runs either way.`);
+  }
   log('  Pre-flight only — nothing was run.\n');
   ev('run_done', { ok: true, answered: 0, requested: requested.length, file: null, exitCode: 0 });
   emitter.close(); render.finish();
@@ -481,7 +492,10 @@ function ask(member, prompt, { stage = '1', raw = false } = {}) {
     return r;
   };
 
-  const plan = prepare(member, prompt, scratch);
+  // `{timeoutMin}` goes in through `subs`, so it is applied to the ARGS TEMPLATE and can never
+  // touch the prompt. Substituting it afterwards rewrote pack content for the argv member.
+  const plan = prepare(member, prompt, scratch, process.platform,
+    { timeoutMin: Math.max(1, timeoutMin - 1) });
   // Tracked for the interrupt path: this file contains the entire context pack.
   const promptFile = plan.ok ? plan.args.find((a) => a.startsWith(scratch)) : null;
   if (promptFile) promptFiles.add(promptFile);
@@ -516,12 +530,7 @@ function ask(member, prompt, { stage = '1', raw = false } = {}) {
       // this is the normal case rather than an edge one.
       // The path resolved at pre-flight, never the bare name — otherwise this could execute a
       // different binary from the one that was checked.
-      // A member whose own CLI has a self-timeout must not abort BEFORE ours. `agy` defaults to 5m
-      // and was pinned to 14m in the roster — correct for the default --timeout of 15, and silently
-      // wrong for any other value: --timeout=30 gave a member that still quit at 14 minutes and was
-      // reported as a plain failure. `{timeoutMin}` is substituted so the two cannot drift.
-      const finalArgs = plan.args.map((a) => a.replace('{timeoutMin}', () => String(Math.max(1, timeoutMin - 1))));
-      p = spawn(member.resolved ?? member.cmd, finalArgs, {
+      p = spawn(member.resolved ?? member.cmd, plan.args, {
         cwd: scratch,
         stdio: [plan.stdin === null ? 'ignore' : 'pipe', 'pipe', 'pipe'],
         detached: true,
@@ -631,6 +640,12 @@ if (has('verify-delivery')) {
   process.exit(bad.length ? 1 : 0);
 }
 
+for (const m of members.filter((x) => x.offPath)) {
+  log(`\n▸ ${m.label} was found in ${m.offPath}, which is not on your PATH.`);
+  log(`    The council spawns the resolved absolute path, so this is informational — but \`${m.cmd}\``);
+  log(`    alone would not work in a shell, which is worth knowing before blaming the council.`);
+}
+
 if (members.length < requested.length) {
   log(`\n  Continuing with ${members.length} of ${requested.length}. A smaller council is a`);
   log('  weaker one — fewer independent readers, and the tally means less.');
@@ -678,6 +693,17 @@ if (argvOnly.length) {
   log(`             ~${est.toLocaleString()} chars against this platform's ~${ceiling.toLocaleString()} limit`
     + `${est > ceiling * 0.8 ? '  ⚠ close to it' : ''}`);
   if (est > ceiling) log(`             ⚠ over the limit — ${argvOnly.map((m) => m.id).join(', ')} will be refused rather than crash`);
+  // Stage 2 is the larger prompt by a wide margin: the same preamble PLUS every member's full answer.
+  // Estimating only stage 1 meant the argv member could clear it, the whole council could spend a
+  // stage, and only then would that member be refused — the pre-spend warning arriving after the
+  // spend. 3,000 chars/answer is a floor from observed runs; real answers are longer, so this
+  // under-states rather than over-states.
+  const est2 = est + members.length * 3_000;
+  if (est2 > ceiling && est <= ceiling) {
+    log(`             ⚠ stage 1 fits but stage 2 will not (~${est2.toLocaleString()} chars once every`);
+    log(`               answer is appended). ${argvOnly.map((m) => m.id).join(', ')} would be refused THEN,`);
+    log(`               after stage 1 had already been paid for. Send fewer files, or drop it now.`);
+  }
   log(`             Their prompt is also visible in the process table while they run.`);
 }
 
@@ -816,7 +842,15 @@ if (wantPeerReview) {
 }
 
 // ── the numbers that do not need a peer-review stage ─────────────────────────
-const overlap = reasoningOverlap(good.map((o) => ({ id: o.id, text: o.text })), packText);
+// Measured on the FIRST answers, always — even under --revise.
+//
+// `good` becomes the revised answers after stage 1b, and the revision round exists precisely to let
+// members converge: each one is handed the others' answers and asked to take what is right in them.
+// Computing "are these five arguments or one" on that output makes the headline diagnostic fire on
+// the convergence the flag was chosen to produce. The independent round is the only one where the
+// question means anything.
+const overlapBasis = opinions.filter((o) => o.ok);
+const overlap = reasoningOverlap(overlapBasis.map((o) => ({ id: o.id, text: o.text })), packText);
 const confidences = Object.fromEntries(good.map((o) => [o.id, parseConfidence(o.text)]));
 const rubricPerJudge = rubricMode
   ? good.map((o) => ({ id: o.id, label: o.label, ...parseRubric(o.text) }))
@@ -832,7 +866,9 @@ if (rubricMode) {
 }
 
 // ── the record ───────────────────────────────────────────────────────────────
-fs.mkdirSync(OUT_DIR, { recursive: true });
+// No mkdir here. `safeWrite` creates the directory itself, AFTER checking it — this call ran before
+// the boundary, so a repo shipping `.council` as a symlink got a directory created at the target
+// before anything was validated. The one-boundary rule means the boundary also owns mkdir.
 const file = path.join(OUT_DIR, `${slug}.md`);
 const byId = Object.fromEntries(good.map((o) => [o.id, o.label]));
 
@@ -895,6 +931,12 @@ const md = [
   ...(tally ? [
     `## Aggregate — Borda over ${tally.counted}/${tally.total} rankings, **self-votes excluded**`,
     ``,
+    ...(tally.degenerate ? [
+      `> **⚠ This tally carries no information.** With only ${good.length} answers and self-votes`,
+      `> excluded, each reviewer ranks exactly one other, so every member scores the same 1.00 whoever`,
+      `> it preferred. The number below is structurally constant, not close. **Read the answers.**`,
+      ``,
+    ] : []),
     `| Member | Score | Ranked by | Answer length | Confidence |`,
     `|---|---|---|---|---|`,
     ...Object.entries(tally.scores).sort((a, b) => b[1] - a[1])

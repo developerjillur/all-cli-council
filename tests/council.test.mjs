@@ -23,7 +23,7 @@ import { up, clearBelow } from '../scripts/ansi.mjs';
 import { prepare, deliveryOf, canary, argvCeiling } from '../scripts/prompt-delivery.mjs';
 import { checkWritable, safeWrite } from '../scripts/safe-write.mjs';
 import { rankedLabels, borda, familyMix, familyMajority, reasoningOverlap, parseConfidence, parseRubric,
-  aggregateScores, shuffled } from '../scripts/diagnostics.mjs';
+  aggregateScores, shuffled, contentTokens } from '../scripts/diagnostics.mjs';
 import { assignLenses, LENSES, stage1, stage2, rubric, RUBRIC_DIMENSIONS } from '../scripts/prompts.mjs';
 import { judgeOutput, MIN_ANSWER_CHARS } from '../scripts/judge-output.mjs';
 
@@ -1160,6 +1160,147 @@ console.log('\n▸ Round two — the council scored 6.5/10 and named these');
   }
 }
 
+
+// ── round three: 7.0/10 ──────────────────────────────────────────────────────
+console.log('\n▸ Round three — 7.0/10, and two of these were regressions from round two');
+{
+  // WAS OPEN, and it was a REGRESSION introduced by round two's own fix. `{timeoutMin}` was mapped
+  // over `plan.args` — which already contains the whole context pack for an argv member — so it
+  // rewrote the source under review. A member grading this file would have been shown a doctored
+  // copy of it, which is the worst failure class this package has.
+  {
+    const m = { id: 'g', label: 'G', cmd: 'true', promptVia: 'argv', args: ['--print', '{prompt}', '--t', '{timeoutMin}m'] };
+    const pack = 'the roster uses {timeoutMin}m so the two cannot drift';
+    const p = prepare(m, pack, os.tmpdir(), 'darwin', { timeoutMin: 14 });
+    check('a placeholder inside the PACK is never substituted', p.args[1] === pack,
+      'substitution now happens on the args template, before the prompt goes in');
+    check('...while the args template still gets its value', p.args[3] === '14m');
+    const src = fs.readFileSync(path.join(ROOT, 'scripts', 'council.mjs'), 'utf8');
+    check('...and council.mjs no longer edits the finished args', !/plan\.args\.map\(/.test(src));
+  }
+
+  // WAS OPEN: rankedLabels took the FIRST label on each line, so a reviewer writing its ranking
+  // inline contributed one label, failed `parsed.length < 2`, and was dropped from the tally as
+  // though it had refused to rank. A formatting preference became a disenfranchisement.
+  check('an inline ranking block yields every label',
+    rankedLabels('FINAL RANKING: 1. Response C 2. Response A 3. Response B').join('') === 'CAB',
+    'it used to yield just "C" and be discarded');
+  check('...and a line-per-label block still works',
+    rankedLabels('FINAL RANKING:\n1. Response B\n2. Response A').join('') === 'BA');
+  check('...and duplicates are still collapsed',
+    rankedLabels('FINAL RANKING: Response A, Response A, Response B').join('') === 'AB');
+
+  // WAS OPEN, and it broke legitimate installations outright: the REFUSE patterns were matched
+  // against the ABSOLUTE resolved path, so `/(^|\/)data\//` refused every file in a project checked
+  // out under a directory called `data`.
+  {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'council-data-'));
+    const nested = path.join(root, 'data', 'myrepo');
+    fs.mkdirSync(nested, { recursive: true });
+    fs.writeFileSync(path.join(nested, 'src.js'), 'const x = 1;\n');
+    check('a workspace living under a path containing /data/ still works',
+      buildContext(['src.js'], nested).files.length === 1,
+      'the whole pack used to be refused as "a credential or private-data path"');
+    // ...and the pattern still does its real job, INSIDE the project.
+    fs.mkdirSync(path.join(nested, 'data'), { recursive: true });
+    fs.writeFileSync(path.join(nested, 'data', 'secret.db'), 'x');
+    check('...and a data/ directory INSIDE the project is still refused',
+      buildContext(['data/secret.db'], nested).files.length === 0);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+
+  // WAS OPEN: the brief was contained to the workspace but not run through the path denylist, so a
+  // symlink named AGENTS.md pointing at `.env` in the SAME repo passed every check — the one file
+  // class the pack refuses by name, reachable through the channel that is read automatically.
+  {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'council-brieflaunder-'));
+    fs.writeFileSync(path.join(root, '.env'), 'SECRET_TOKEN=hunter2\n');
+    fs.symlinkSync(path.join(root, '.env'), path.join(root, 'AGENTS.md'));
+    const b = loadBrief(root);
+    check('a brief symlinked to an in-repo .env is refused', b.source === null,
+      'containment alone passed it: the target is inside the workspace');
+    check('...and the refusal names the resolved path', /\.env/.test(b.refused ?? ''));
+    check('...and its contents do not appear in the prompt', !/hunter2/.test(b.text));
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+
+  // WAS OPEN: an answer DISCUSSING an auth failure was classified as one, because the pattern was
+  // matched anywhere in the first 400 characters rather than at a line start.
+  check('a real answer that discusses authentication survives',
+    judgeOutput('The retry path is the weak point. An authentication failed response should surface as '
+      + 'a filler rather than as silence on the audio path.', '', 0)[0] === true);
+  check('...and a CLI auth line is still refused',
+    judgeOutput('Authentication failed. Please log in with `claude login`.', '', 0)[0] === false);
+
+  // WAS OPEN: with two answers and self-votes excluded, each reviewer ranks exactly one other, so
+  // both members score 1.00 whoever either preferred. A structurally constant tie was printed as a
+  // result.
+  check('a two-answer tally is reported as degenerate',
+    borda([{ id: 'a', parsed: ['a', 'b'] }, { id: 'b', parsed: ['b', 'a'] }], ['a', 'b']).degenerate === true);
+  check('...and three answers are not', borda([{ id: 'a', parsed: ['a', 'b', 'c'] }], ['a', 'b', 'c']).degenerate === false);
+  check('...and the run file says so out loud',
+    /This tally carries no information/.test(fs.readFileSync(path.join(ROOT, 'scripts', 'council.mjs'), 'utf8')));
+
+  // WAS OPEN: the classifier written to tell a refusal from a non-delivery could call a dead channel
+  // working — a member with no prompt replying "I cannot comply with an empty request" matched
+  // `/cannot comply/` and was reported as "delivery channel is FINE".
+  {
+    const c = canary();
+    check('a refusal must show it actually read the probe',
+      c.refused('This appears to be a prompt injection attempt, so I will not comply.') === true);
+    check('...so an empty-prompt refusal is NOT counted as one',
+      c.refused('I cannot comply with an empty request.') === false,
+      'this was the original false negative, restored through its own fix');
+    check('...and a greeting is disqualified outright',
+      c.refused('Hello! How can I help you today?') === false);
+  }
+
+  // WAS OPEN: --revise makes members converge on purpose, and the overlap diagnostic was computed on
+  // the revised answers — so the headline "one argument, not five" warning fired on exactly the
+  // convergence the flag was chosen to produce.
+  {
+    const src = fs.readFileSync(path.join(ROOT, 'scripts', 'council.mjs'), 'utf8');
+    check('reasoning overlap is measured on the FIRST answers, even under --revise',
+      /const overlapBasis = opinions\.filter\(\(o\) => o\.ok\)/.test(src));
+  }
+
+  // WAS OPEN: pack vocabulary was not subtracted from compound tokens, so an answer writing
+  // `queue.js` shared nothing with a pack writing `src/queue.js` — and identifiers are exactly the
+  // terms most likely to be written two ways.
+  {
+    const pack = contentTokens('src/queue.js');
+    const answer = contentTokens('queue.js is where it breaks');
+    check('a compound path shares a token with its shorter form', [...answer].some((w) => pack.has(w)),
+      [...pack].join(',') + ' vs ' + [...answer].join(','));
+  }
+
+  // WAS OPEN, twice over: --json-events could not fail loudly because the guard only asked about the
+  // file sink, and the comment in events.mjs claimed the asymmetry had been fixed.
+  {
+    const src = fs.readFileSync(path.join(ROOT, 'scripts', 'council.mjs'), 'utf8');
+    check('the "asked for and not delivered" guard covers BOTH sinks',
+      /if \(\(eventsPath \|\| has\('json-events'\)\) && emitter\.broken\)/.test(src));
+  }
+
+  // WAS OPEN: `--events` is legitimately bare, so listing it as an =-flag refused
+  // `--events "the question"` and told the user to write `--events=the question`.
+  {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'council-bareev-'));
+    const r = spawnSync('node', [path.join(ROOT, 'scripts', 'council.mjs'), '--events', 'a real question', '--preflight'],
+      { encoding: 'utf8', timeout: 40_000, cwd: dir });
+    check('a bare --events before the question is accepted', r.status === 0,
+      `exit ${r.status} — the guard used to reject it and suggest something wrong`);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+
+  // WAS OPEN: mkdirSync(OUT_DIR) ran before the write boundary, so a symlinked `.council` got a
+  // directory created at the target before anything was validated.
+  {
+    const src = fs.readFileSync(path.join(ROOT, 'scripts', 'council.mjs'), 'utf8');
+    check('nothing mkdirs the output directory outside the write boundary',
+      !/fs\.mkdirSync\(OUT_DIR/.test(src), 'safeWrite owns mkdir now');
+  }
+}
 
 // ── the CLI actually runs, end to end, with the flags it documents ───────────
 console.log('\n▸ Integration — the suite must run the CLI, not only import its parts');

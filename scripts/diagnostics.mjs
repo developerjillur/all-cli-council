@@ -49,9 +49,18 @@ answer question response responses model models`.split(/\s+/));
 
 export function contentTokens(text) {
   const out = new Set();
+  // Split on joiners too, and keep BOTH the compound and its parts.
+  //
+  // The tokeniser kept `src/queue.js` as one token, so an answer writing `queue.js` shared nothing
+  // with a pack that wrote `src/queue.js` — the pack's vocabulary was not subtracted, and the terms
+  // most likely to be written two ways are exactly the identifiers every member discusses. Keeping
+  // the compound as well means an answer that quotes a full path still matches one that does.
   for (const raw of String(text ?? '').toLowerCase().split(/[^a-z0-9_.$/-]+/)) {
-    const w = raw.replace(/^[.\-/]+|[.\-/]+$/g, '');
-    if (w.length > 3 && !STOP.has(w) && !/^\d+$/.test(w)) out.add(w);
+    const compound = raw.replace(/^[.\-/]+|[.\-/]+$/g, '');
+    if (!compound) continue;
+    for (const w of [compound, ...compound.split(/[./\-_]+/)]) {
+      if (w.length > 3 && !STOP.has(w) && !/^\d+$/.test(w)) out.add(w);
+    }
   }
   return out;
 }
@@ -152,9 +161,18 @@ export function parseRanking(text) {
  */
 export function rankedLabels(text) {
   const seen = new Set();
-  return parseRanking(text).split('\n')
-    .map((l) => l.match(/Response\s+([A-Z])\b/i)?.[1]?.toUpperCase())
-    .filter(Boolean)
+  // `matchAll` over the whole block, not one match per line.
+  //
+  // The line-by-line version took `.match()[1]` — the FIRST label on each line — so a reviewer that
+  // wrote its ranking inline ("FINAL RANKING: 1. Response C 2. Response A 3. Response B") contributed
+  // exactly one label, `parsed.length < 2`, and was **dropped from the tally entirely** as if it had
+  // refused to rank. A formatting preference silently became a disenfranchisement, and the run file
+  // reported it as "no parseable FINAL RANKING block" — which was true and misleading.
+  //
+  // Order is preserved because matchAll scans left to right, and lines are still the natural layout;
+  // this only stops depending on them.
+  return [...parseRanking(text).matchAll(/Response\s+([A-Z])\b/gi)]
+    .map((m) => m[1].toUpperCase())
     .filter((L) => !seen.has(L) && seen.add(L));
 }
 
@@ -207,8 +225,16 @@ export function borda(reviews, ids) {
     });
   }
 
+  // **With two answers the tally is empty, and it used to print a confident tie.**
+  //
+  // Self-votes are excluded, so each of two reviewers ranks exactly ONE other — every reviewer's
+  // single award is 1.0 and both members score 1.0 regardless of who either of them preferred. The
+  // number is not close; it is structurally constant. Reported as degenerate rather than printed as
+  // a result, because a tie that cannot come out any other way looks exactly like a genuine tie.
+  const degenerate = ids.length < 3;
+
   return {
-    scores, ranked, counted, total: reviews.length,
+    scores, ranked, counted, total: reviews.length, degenerate,
     selfFirst, selfN: selfRanks.length,
     selfMean: selfRanks.length ? mean(selfRanks) : null,
   };

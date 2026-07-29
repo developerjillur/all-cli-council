@@ -7,14 +7,14 @@
 [![node](https://img.shields.io/badge/node-%3E%3D22-brightgreen)](https://nodejs.org)
 [![dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)](#quick-start)
 [![API keys](https://img.shields.io/badge/API%20keys-none-brightgreen)](#the-members)
-[![tests](https://img.shields.io/badge/tests-518-blue)](tests/council.test.mjs)
+[![tests](https://img.shields.io/badge/tests-556-blue)](tests/council.test.mjs)
 
 **Four models. Three vendors. They rank each other blind. You decide.**
 
 <sub>Five and four until one member was measured able to write files. It is excluded by default,
 and that trade is [documented rather than hidden](#-three-of-five-members-could-write-files--while-a-test-said-they-could-not).</sub>
 
-[Quick start](#quick-start) · [How it activates](#how-it-activates) · [What makes it different](#what-makes-it-different) · [Members](#the-members) · [The brief](#the-brief--the-cheapest-quality-win-available) · [FAQ](#faq) · [Limits](#honest-limitations) · [Contributing](CONTRIBUTING.md)
+[Quick start](#quick-start) · [Commands](#or-on-demand--two-commands-because-they-answer-to-different-people) · [How it activates](#how-it-activates) · [What makes it different](#what-makes-it-different) · [Members](#the-members) · [The brief](#the-brief--the-cheapest-quality-win-available) · [FAQ](#faq) · [Limits](#honest-limitations) · [Contributing](CONTRIBUTING.md)
 
 </div>
 
@@ -45,8 +45,9 @@ node scripts/council.mjs "Is this cache invalidation actually correct?" --contex
 /plugin install all-cli-council@all-cli-council
 ```
 
-Then it works **two ways**: the skill fires it automatically when a decision is expensive to
-reverse, and `/council <question>` runs it on demand. See
+Then it works **three ways**: the skill fires it automatically when a decision is expensive to reverse,
+`/council <question>` runs it on demand, and `/council-custom` runs it exactly the way you specify —
+members, mode, files, budget — with no judgement call about whether it was worth it. See
 [how it activates](#how-it-activates).
 
 ### Standalone
@@ -107,14 +108,45 @@ A skill that fires eagerly on a 10–30 minute tool is worse than no skill at al
 **If unsure, do the cheap thing first.** A council after five minutes of reading is a much
 better council, because the question is sharper.
 
-### Or on demand
+### Or on demand — two commands, because they answer to different people
 
 ```
 /council Is the retry logic in src/queue.js safe under a partial network partition?
 ```
 
-The slash command is the guarantee. **Whether the skill fires is the model's judgement, not a
-rule** — the description is as specific as it can be, but if you need it to run, ask for it.
+`/council` is the guarantee that it runs at all: **whether the skill fires is the model's judgement,
+not a rule.** It still weighs whether a council is worth 10–30 minutes, and it may talk you out of one.
+
+```
+/council-custom Grade src/queue.js out of 10 — only the Claude models, use lenses, 10 minute limit
+```
+
+`/council-custom` is the guarantee that it runs **your way**. You describe the setup in plain words and
+it is translated to flags, echoed back before anything is spent, and run exactly as stated. The
+"is the answer knowable?" gate does not apply — you typed it deliberately, and that is the whole reason
+it exists.
+
+| | fires on | second-guesses you? | picks the setup |
+|---|---|---|---|
+| the **skill** | its own judgement of the situation | — | it does |
+| **`/council`** | your asking | yes, and may decline | it does |
+| **`/council-custom`** | your asking | **no** | **you do** |
+
+It understands the things you would actually say:
+
+| You say | It runs |
+|---|---|
+| "only Claude" · "just codex and gemini" | `--members=…` |
+| "grade it out of 10" · "rate this" | `--rubric` |
+| "make them disagree" · "different angles" | `--lenses` |
+| "let them see each other" · "second pass" | `--revise` |
+| "quick" · "just their opinions" | `--stage1-only` |
+| "give it 30 minutes" | `--timeout=30` |
+| "include grok" · "all five" | `--allow-uncontained`, **with the warning** |
+
+Anything you did not ask for is not added, and the whole roster runs unless you narrow it. It launches
+[detached](#-detached-so-a-1030-minute-run-cannot-be-lost-with-its-session), so the run survives this
+session and the feed reports as it goes.
 
 ---
 
@@ -124,7 +156,9 @@ rule** — the description is as specific as it can be, but if you need it to ru
 all-cli-council/
 ├── skills/council/SKILL.md      ← the auto-invocation path. Without this it only
 │                                   runs when typed
-├── commands/council.md          ← /council, the on-demand guarantee
+├── commands/
+│   ├── council.md               ← /council — runs it, and may talk you out of it
+│   └── council-custom.md        ← /council-custom — runs it YOUR way, no second-guessing
 ├── scripts/
 │   ├── council.mjs              orchestration: stages, aggregation, teardown
 │   ├── context.mjs              the pack — containment, secret refusal, injection fencing
@@ -143,7 +177,7 @@ all-cli-council/
 │   ├── judge-output.mjs         is this an answer, or a CLI saying it cannot answer
 │   └── members.json             the roster. Override with .council/members.json
 ├── tests/
-│   ├── council.test.mjs         518 cases, spends nothing
+│   ├── council.test.mjs         556 cases, spends nothing
 │   └── survives-session-death.mjs  one live call: SIGKILL the session, mid-run
 └── .claude-plugin/              plugin + marketplace manifests
 ```
@@ -174,7 +208,7 @@ which is what "installed as a plugin" actually means:
 ✅  a real run writes into the USER project                .council/runs/{md,json,ndjson}
 ✅  the plugin directory is untouched                      git status: 0 changed files
 ✅  the environment allowlist holds                        7 passed to members, 50 withheld
-✅  518/518 tests pass from the fresh clone                and with no `npm install`
+✅  556/556 tests pass from the fresh clone                and with no `npm install`
 ```
 
 **4/4, not 5/5** — `grok` is excluded by default because it cannot be prevented from writing. The
@@ -915,7 +949,7 @@ Listed because a tool that hides these is worth less than one without them.
 ## Tests
 
 ```bash
-node tests/council.test.mjs              # 518 cases, spends nothing
+node tests/council.test.mjs              # 556 cases, spends nothing
 node tests/survives-session-death.mjs    # one live call — proves --detach for real
 ```
 
@@ -927,14 +961,16 @@ procfs, and a `--detach=1` fork bomb.
 
 ### What "tested" means here, precisely
 
-Not all 518 are equal, and pretending otherwise would be the kind of claim this repo keeps a list of:
+Not all of them are equal, and pretending otherwise would be the kind of claim this repo keeps a list
+of. Measured over the **465 `check()` call sites** in the suite — the runtime count is higher
+because some sites run inside loops:
 
-| | count | what it proves |
+| | call sites | what it proves |
 |---|---|---|
-| **behavioural** | **439** | runs the code or spawns the process and checks what happens |
-| **source assertions** | **79** | that a file *contains* something — `O_NOFOLLOW` is used, `NODE_OPTIONS` is not in the allowlist, no recursive `mkdir` remains |
+| **behavioural** | **373** | runs the code or spawns the process and checks what happens |
+| **source assertions** | **92** (20%) | that a file *contains* something — `O_NOFOLLOW` is used, `NODE_OPTIONS` is not in the allowlist, no recursive `mkdir` remains |
 
-The 79 are real and worth having — several of them are how a fix stays fixed, and "no `mkdirSync(...,
+The 92 are real and worth having — several of them are how a fix stays fixed, and "no `mkdirSync(...,
 {recursive:true})` anywhere in `scripts/`" is exactly the assertion that keeps a hang from coming
 back. But **they verify that code was written a certain way, not that the behaviour follows.** Between
 those two sits an operating system, and this repo has now been surprised by that OS twice: a recursive

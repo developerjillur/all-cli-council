@@ -33,23 +33,31 @@ members themselves are buffered and cannot be streamed, so do not promise stream
 
 ## Reading the result
 
-1. **Read every stage-1 answer before the rankings.** The tally pulls you toward consensus;
-   form your own view first or you are synthesising their synthesis.
-2. **Where they disagree is the output.** Record both sides. Averaging the members produces
-   something none of them would defend.
-3. **Read the bias diagnostics above the score.** Self-enhancement, verbosity, family mix and
-   **reasoning overlap** are printed every run, flagged when present. Overlap is the measured form
-   of "consensus is not correctness" — the pack’s own vocabulary is subtracted, so what remains is
-   how much of the agreement was five arguments rather than one told five times.
-4. **Weigh by confidence.** Every answer ends with `CONFIDENCE:` and `WOULD CHANGE MY MIND IF:`.
-   Agreement at 55% is a request for more context, and that second line names the measurement.
-5. **Carry the minority view into the synthesis** even if you overrule it, and say what it cost.
-4. **Every number goes through your own verification**, however many members stated it.
+**The reading discipline lives in one place: `skills/council/SKILL.md`.** Follow it from there rather
+than from a copy — read every stage-1 answer before the rankings, treat disagreement as the output,
+read the diagnostics above the score, weigh by confidence rather than by count, carry the minority view
+even when you overrule it, and verify every number yourself.
+
+It was duplicated here and in `/council-custom`, and the two copies had already drifted — this one's
+numbered list ran 1, 2, 3, 4, 5, 4. That is what two sources of the same doctrine does, reliably, and it
+is why there is now one.
+
+`.council/runs/<slug>.md` is the run. `<slug>.json` is the same thing for a program.
+
+## Two things the flags cost, worth saying once
+
+These belong to the script, so they apply to `/council-custom` identically.
+
+- **`--allow-uncontained` admits a member measured able to write to any absolute path.** The pack you
+  send is repository content, and a file in it can carry an instruction aimed at whoever reads it next.
+  `scripts/verify-containment.mjs` decides which member that is — do not name one from memory.
+- **A repo-local roster chooses what gets executed**, so `--local-roster` also needs
+  `--allow-uncontained`. The flags are separate for that reason.
 
 ## Then write the synthesis where the work is
 
-A card, a decision record, a PR comment — not in chat. Cite the run file by path.
+A card, a decision record, a PR comment — not only in chat. Cite the run file by path.
 
-**Do not adopt a council's answer.** It is material for your judgement. If you are running it
-because a choice is uncomfortable rather than unclear, you will get a well-argued average and
-a decision nobody owns.
+**Do not adopt a council's answer.** It is material for your judgement. If you are running it because a
+choice is uncomfortable rather than unclear, you will get a well-argued average and a decision nobody
+owns.

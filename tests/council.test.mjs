@@ -2210,6 +2210,173 @@ console.log('\n▸ Round seven — the newest feature was not held to the standa
     'dead code that looks like it does something is worse than none');
 }
 
+// ── the docs cannot promise a flag the code does not have ─────────────────────
+console.log('\n▸ Documentation drift — every flag and script the docs name must exist');
+{
+  // This is the defect class the council found most often: a comment or a doc describing behaviour the
+  // code does not have. `resolveCmd`'s comment promised a report nothing produced; `events.mjs` claimed
+  // an asymmetry was fixed while the guard still had it; `context.mjs` said its ceiling sat inside the
+  // verified-obedient zone when it does not. Every one was found by a reader, not by a test.
+  //
+  // A doc is a claim. These are cheap to check mechanically, so they are checked mechanically.
+  const docFiles = [
+    ...fs.readdirSync(path.join(ROOT, 'commands')).map((f) => path.join('commands', f)),
+    path.join('skills', 'council', 'SKILL.md'),
+    'README.md',
+  ];
+
+  // Flags belonging to the sibling scripts, which are not council.mjs's.
+  const OTHER_SCRIPT_FLAGS = new Set(['json', 'once', 'every', 'quiet-after', 'follow']);
+
+  // Flags belonging to the MEMBER CLIs. Sourced from the roster rather than hardcoded, so a member
+  // whose invocation changes cannot leave the docs describing flags nothing passes any more.
+  const roster = JSON.parse(fs.readFileSync(path.join(ROOT, 'scripts', 'members.json'), 'utf8'));
+  const memberFlags = new Set(roster.members
+    .flatMap((m) => [...m.args, ...(m.readOnlyBy ?? [])])
+    .filter((a2) => typeof a2 === 'string' && a2.startsWith('--'))
+    .map((a2) => a2.slice(2)));
+
+  // Third-party CLI flags the README discusses because they were TRIED and did not work — the grok
+  // containment measurement is the whole point of naming them, so they are legitimate prose. Listed
+  // explicitly, with the reason, rather than exempted by a loose pattern.
+  const DISCUSSED_AND_REJECTED = new Set([
+    'tools',              // grok: an allowlist that did not constrain it
+    'disallowed-tools',   // grok: a denylist that did not constrain it
+    'output-format',      // measured for streaming; not adopted
+    'print-timeout',      // agy's own self-timeout, substituted via {timeoutMin}
+    'skip-git-repo-check',
+    'reasoning-effort',
+    'disable-web-search',
+    'effort',
+    'model',
+    'verbose',
+    'require',            // named only as what NODE_OPTIONS could inject
+  ]);
+
+  const councilFlags = new Set([...Object.keys(FLAGS), ...memberFlags, ...DISCUSSED_AND_REJECTED]);
+
+  for (const rel of docFiles) {
+    const body = fs.readFileSync(path.join(ROOT, rel), 'utf8');
+
+    // Every `--flag` the doc mentions, ignoring prose hyphenation and `--` on its own.
+    const mentioned = [...new Set([...body.matchAll(/(?<![\w-])--([a-z][a-z0-9-]{1,30})\b/g)].map((m) => m[1]))];
+    const unknown = mentioned.filter((f) => !councilFlags.has(f) && !OTHER_SCRIPT_FLAGS.has(f));
+    check(`${rel}: every --flag it names exists`, unknown.length === 0,
+      unknown.length ? `not real: ${unknown.map((f) => `--${f}`).join(' ')}` : `${mentioned.length} checked`);
+
+    // Every `scripts/x.mjs` it points at.
+    const scripts = [...new Set([...body.matchAll(/scripts\/([a-z-]+\.mjs)/g)].map((m) => m[1]))];
+    const missing = scripts.filter((f) => !fs.existsSync(path.join(ROOT, 'scripts', f)));
+    check(`${rel}: every scripts/*.mjs it points at exists`, missing.length === 0,
+      missing.length ? `missing: ${missing.join(' ')}` : `${scripts.length} checked`);
+  }
+
+  // WAS NEARLY SHIPPED. A plugin install copies TRACKED files, so a command that exists on disk and
+  // not in git arrives for its author and for nobody else — the same shape as the `$CLAUDE_PLUGIN_ROOT`
+  // path bug this package already records, one layer up. Caught by simulating an install from
+  // `git ls-files`, which is why that simulation exists rather than copying the directory.
+  {
+    // **Only meaningful inside a git working tree**, and saying so beats failing everywhere else. A
+    // tarball, a release archive or a plugin directory has no `.git`, so `git ls-files` returns nothing
+    // and every file looks untracked — which is the machine-dependent trap this file already records CI
+    // catching twice. CI runs actions/checkout, so the check does run for real there.
+    const inGitTree = spawnSync('git', ['rev-parse', '--is-inside-work-tree'],
+      { encoding: 'utf8', cwd: ROOT }).stdout.trim() === 'true';
+    if (!inGitTree) {
+      check('tracked-files check skipped — not a git working tree', true,
+        'meaningful only where git can answer; CI checks out a real tree');
+    } else {
+    const tracked = new Set(spawnSync('git', ['ls-files', 'commands', 'skills', 'scripts', 'tests'],
+      { encoding: 'utf8', cwd: ROOT }).stdout.split('\n').filter(Boolean));
+    const onDisk = [
+      ...fs.readdirSync(path.join(ROOT, 'commands')).map((f) => `commands/${f}`),
+      ...fs.readdirSync(path.join(ROOT, 'scripts')).map((f) => `scripts/${f}`),
+      ...fs.readdirSync(path.join(ROOT, 'tests')).map((f) => `tests/${f}`),
+    ];
+    const untracked = onDisk.filter((f) => !tracked.has(f));
+    check('every command, script and test is TRACKED, so an install actually gets it',
+      untracked.length === 0,
+      untracked.length ? `untracked: ${untracked.join(' ')}` : `${onDisk.length} files`);
+    }
+  }
+
+  // Both commands must be loadable as commands at all: frontmatter with a description.
+  for (const f of fs.readdirSync(path.join(ROOT, 'commands'))) {
+    const body = fs.readFileSync(path.join(ROOT, 'commands', f), 'utf8');
+    check(`commands/${f} opens with YAML frontmatter`, body.startsWith('---\n'));
+    const fm = body.slice(4, body.indexOf('\n---', 4));
+    check(`commands/${f} declares a description`, /^description:\s*\S/m.test(fm));
+    check(`commands/${f} declares an argument-hint`, /^argument-hint:\s*\S/m.test(fm));
+    check(`commands/${f} substitutes $ARGUMENTS`, body.includes('$ARGUMENTS'),
+      'a command that ignores its arguments is a doc, not a command');
+    check(`commands/${f} resolves scripts through $CLAUDE_PLUGIN_ROOT`,
+      !/node\s+scripts\//.test(body),
+      'a bare relative path works for the author and fails for every installer');
+  }
+
+  // WAS OPEN, and a judge found it by reading both files side by side: the "reading the result"
+  // doctrine was copy-pasted into BOTH commands, and the copies had already drifted — council.md's
+  // numbered list ran 1, 2, 3, 4, 5, 4. Two sources of one doctrine drift, reliably, so there is now
+  // one and the commands point at it. This is the test that keeps it that way.
+  {
+    const cmds = fs.readdirSync(path.join(ROOT, 'commands'))
+      .map((f) => ({ f, body: fs.readFileSync(path.join(ROOT, 'commands', f), 'utf8') }));
+    // Distinctive phrases from the doctrine. If more than one command spells them out, it is duplicated.
+    for (const phrase of [
+      'form your own view first',
+      'Averaging the members produces',
+      'Agreement at 55%',
+    ]) {
+      const owners = cmds.filter((c) => c.body.includes(phrase)).map((c) => c.f);
+      check(`the doctrine phrase "${phrase.slice(0, 32)}…" lives in at most one command`,
+        owners.length <= 1, owners.join(' + ') || 'none');
+    }
+    for (const c of cmds) {
+      check(`commands/${c.f} points at the skill for the reading discipline`,
+        /SKILL\.md/.test(c.body), 'one source, or they drift');
+    }
+    // And no numbered list may repeat a number — the exact shape the drift took.
+    for (const c of cmds) {
+      const nums = [...c.body.matchAll(/^(\d+)\. \*\*/gm)].map((m) => Number(m[1]));
+      const dupes = nums.filter((n, i2) => nums.indexOf(n) !== i2);
+      check(`commands/${c.f} has no repeated list numbers`, dupes.length === 0,
+        dupes.length ? `repeats: ${[...new Set(dupes)].join(', ')}` : `${nums.length} items`);
+    }
+  }
+
+  // The two commands must be genuinely different, or one of them is noise.
+  {
+    const plain = fs.readFileSync(path.join(ROOT, 'commands', 'council.md'), 'utf8');
+    const custom = fs.readFileSync(path.join(ROOT, 'commands', 'council-custom.md'), 'utf8');
+    check('/council still applies the "is the answer knowable?" gate',
+      /knowable/.test(plain));
+    check('/council-custom explicitly does NOT apply it',
+      /does \*\*not\*\*|Skip it/.test(custom),
+      'the user typed it deliberately — that is the whole reason it exists');
+    check('/council-custom launches detached rather than blocking', /--detach/.test(custom));
+    check('/council-custom warns about --allow-uncontained', /allow-uncontained/.test(custom));
+    check('...and about a repo-local roster deciding what runs', /local-roster/.test(custom));
+    check('/council-custom tells the user the command before spending',
+      /print the command first/i.test(custom));
+    check('...and warns about shell-quoting the user\'s own prose',
+      /Quote the question safely/.test(custom),
+      'a question containing a quote or a $ is mangled or expanded by a double-quoted shell string');
+    check('...and states --detach as a DEFAULT rather than pretending it was asked for',
+      /goes on by default/.test(custom) && /exception to the rule/.test(custom),
+      'the command\'s own rule is "do not add flags they did not ask for"');
+    check('...backing the default with a measured number, not an assumption',
+      /34 successful member answers/.test(custom) && /5m08s/.test(custom));
+    check('...and its --members example matches the words it maps',
+      /"only codex and gemini"[\s\S]{0,90}--members=codex,gemini/.test(custom),
+      'it said codex and gemini and mapped to the two Claude ids');
+    check('...and "quick" is not silently equated with skipping the ranking',
+      /"quick" is ambiguous/.test(custom),
+      '--stage1-only changes WHAT you get, not how long it takes');
+    check('...and roster facts are read from --preflight, not hardcoded in prose',
+      /--preflight prints the roster's actual ids|run\s+`--preflight`|do not name one from memory/.test(custom));
+  }
+}
+
 // ── the CLI actually runs, end to end, with the flags it documents ───────────
 console.log('\n▸ Integration — the suite must run the CLI, not only import its parts');
 {

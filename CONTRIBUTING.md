@@ -52,7 +52,7 @@ here were the same shape: failing open, silently, in a way that read as success.
 ## Tests
 
 ```bash
-node tests/council.test.mjs     # 566 cases, spends nothing
+node tests/council.test.mjs     # 573 cases, spends nothing
 ```
 
 **Every case must be demonstrated OPEN before it is closed.** If you fix something, show the

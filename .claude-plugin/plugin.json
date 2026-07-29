@@ -1,7 +1,7 @@
 {
   "name": "all-cli-council",
-  "version": "1.0.0",
-  "description": "Ask four models across three vendors the same hard question, have them rank each other anonymously, then synthesise. Runs on the CLIs you already have — no API keys.",
+  "version": "1.1.0",
+  "description": "Ask four models across three vendors the same hard question, have them rank each other anonymously, then synthesise. Detachable so a long run outlives your session. Runs on the CLIs you already have — no API keys.",
   "author": {
     "name": "Jillur Rahman",
     "url": "https://github.com/developerjillur"

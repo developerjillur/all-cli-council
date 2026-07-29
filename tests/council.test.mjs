@@ -2409,6 +2409,47 @@ console.log('\n▸ Documentation drift — every flag and script the docs name m
   }
 }
 
+// ── the README's own numbers, checked against the suite ──────────────────────
+console.log('\n▸ The README cannot quote a number the suite disagrees with');
+{
+  // Found while finalising: the README stated 465 call sites / 373 behavioural / 92 source, and the
+  // real figures were 472 / 374 / 98. Nothing was wrong with the code — the DOC had drifted, which is
+  // the single most common defect this package's own councils found in it, seven rounds running.
+  //
+  // So the numbers are recomputed here and compared. A doc that quotes a measurement should fail the
+  // build when the measurement moves, or it is not a measurement, it is a memory.
+  const suiteSrc = fs.readFileSync(path.join(ROOT, 'tests', 'council.test.mjs'), 'utf8').split('\n');
+  let sourceSites = 0, behaviouralSites = 0;
+  for (let i = 0; i < suiteSrc.length; i++) {
+    if (!/\bcheck\(/.test(suiteSrc[i])) continue;
+    const body = suiteSrc.slice(i, i + 4).join(' ');
+    const isSourceGrep = /\.test\((?:src|councilSrc|allow|custom|plain|c\.body|skill)\b/.test(body)
+      || /\.test\(fs\.readFileSync/.test(body);
+    isSourceGrep ? sourceSites++ : behaviouralSites++;
+  }
+  const sites = sourceSites + behaviouralSites;
+  const readme = fs.readFileSync(path.join(ROOT, 'README.md'), 'utf8');
+  const claimed = (re) => Number((readme.match(re) ?? [])[1]);
+
+  check('the README\'s call-site total matches the suite',
+    claimed(/\*\*(\d+) `check\(\)` call sites\*\*/) === sites,
+    `README ${claimed(/\*\*(\d+) `check\(\)` call sites\*\*/)} vs measured ${sites}`);
+  check('...and its behavioural count', claimed(/\| \*\*behavioural\*\* \| \*\*(\d+)\*\* \|/) === behaviouralSites,
+    `README ${claimed(/\| \*\*behavioural\*\* \| \*\*(\d+)\*\* \|/)} vs measured ${behaviouralSites}`);
+  check('...and its source-assertion count', claimed(/\| \*\*source assertions\*\* \| \*\*(\d+)\*\*/) === sourceSites,
+    `README ${claimed(/\| \*\*source assertions\*\* \| \*\*(\d+)\*\*/)} vs measured ${sourceSites}`);
+
+  // The headline test count, in every place it is written down.
+  const badge = claimed(/tests-(\d+)-blue/);
+  for (const [what, re] of [
+    ['the badge', /tests-(\d+)-blue/],
+    ['the package layout', /council\.test\.mjs\s+(\d+) cases/],
+    ['the Tests section', /node tests\/council\.test\.mjs\s+# (\d+) cases/],
+    ['the install proof', /✅  (\d+)\/\d+ tests pass/],
+  ]) check(`${what} quotes the same test count`, claimed(re) === badge,
+    `${claimed(re)} vs ${badge}`);
+}
+
 // ── the CLI actually runs, end to end, with the flags it documents ───────────
 console.log('\n▸ Integration — the suite must run the CLI, not only import its parts');
 {

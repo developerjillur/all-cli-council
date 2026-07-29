@@ -7,7 +7,7 @@
 [![node](https://img.shields.io/badge/node-%3E%3D22-brightgreen)](https://nodejs.org)
 [![dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)](#quick-start)
 [![API keys](https://img.shields.io/badge/API%20keys-none-brightgreen)](#the-members)
-[![tests](https://img.shields.io/badge/tests-566-blue)](tests/council.test.mjs)
+[![tests](https://img.shields.io/badge/tests-573-blue)](tests/council.test.mjs)
 
 **Four models. Three vendors. They rank each other blind. You decide.**
 
@@ -177,7 +177,7 @@ all-cli-council/
 │   ├── judge-output.mjs         is this an answer, or a CLI saying it cannot answer
 │   └── members.json             the roster. Override with .council/members.json
 ├── tests/
-│   ├── council.test.mjs         566 cases, spends nothing
+│   ├── council.test.mjs         573 cases, spends nothing
 │   └── survives-session-death.mjs  one live call: SIGKILL the session, mid-run
 └── .claude-plugin/              plugin + marketplace manifests
 ```
@@ -208,7 +208,7 @@ which is what "installed as a plugin" actually means:
 ✅  a real run writes into the USER project                .council/runs/{md,json,ndjson}
 ✅  the plugin directory is untouched                      git status: 0 changed files
 ✅  the environment allowlist holds                        7 passed to members, 50 withheld
-✅  566/566 tests pass from the fresh clone                and with no `npm install`
+✅  573/573 tests pass from the fresh clone                and with no `npm install`
 ```
 
 **4/4, not 5/5** — `grok` is excluded by default because it cannot be prevented from writing. The
@@ -950,7 +950,7 @@ Listed because a tool that hides these is worth less than one without them.
 ## Tests
 
 ```bash
-node tests/council.test.mjs              # 566 cases, spends nothing
+node tests/council.test.mjs              # 573 cases, spends nothing
 node tests/survives-session-death.mjs    # one live call — proves --detach for real
 ```
 
@@ -963,15 +963,15 @@ procfs, and a `--detach=1` fork bomb.
 ### What "tested" means here, precisely
 
 Not all of them are equal, and pretending otherwise would be the kind of claim this repo keeps a list
-of. Measured over the **465 `check()` call sites** in the suite — the runtime count is higher
+of. Measured over the **476 `check()` call sites** in the suite — the runtime count is higher
 because some sites run inside loops:
 
 | | call sites | what it proves |
 |---|---|---|
-| **behavioural** | **373** | runs the code or spawns the process and checks what happens |
-| **source assertions** | **92** (20%) | that a file *contains* something — `O_NOFOLLOW` is used, `NODE_OPTIONS` is not in the allowlist, no recursive `mkdir` remains |
+| **behavioural** | **378** | runs the code or spawns the process and checks what happens |
+| **source assertions** | **98** (21%) | that a file *contains* something — `O_NOFOLLOW` is used, `NODE_OPTIONS` is not in the allowlist, no recursive `mkdir` remains |
 
-The 92 are real and worth having — several of them are how a fix stays fixed, and "no `mkdirSync(...,
+The 98 are real and worth having — several of them are how a fix stays fixed, and "no `mkdirSync(...,
 {recursive:true})` anywhere in `scripts/`" is exactly the assertion that keeps a hang from coming
 back. But **they verify that code was written a certain way, not that the behaviour follows.** Between
 those two sits an operating system, and this repo has now been surprised by that OS twice: a recursive
@@ -1020,7 +1020,9 @@ why it can run on every push.
 - [x] Minority view and its cost captured, not averaged away
 - [ ] **Council vs single model, measured** ← still the one that matters
 - [ ] **`--lenses` on vs off, measured by reasoning overlap** ← now possible, and cheap
-- [x] **Graded itself, and acted on the result** — 5.0/10, and every finding closed with a test
+- [x] **Graded itself seven times, and acted on it** — 5.0 → 7.3, every finding closed with a test
+- [x] **Detachable** — a 10–30 minute run outlives the session that started it, proven by SIGKILL
+- [x] **The question never touches a shell** — `--question-file`, after the quoting advice proved worse than the bug
 - [x] Repo-supplied rosters and briefs treated as untrusted input
 - [x] Nothing outlives an interrupt; the event stream always terminates
 - [ ] Bias numbers at n≥30
@@ -1028,7 +1030,8 @@ why it can run on every push.
 - [ ] Per-vendor streaming JSON, so progress is token-level where the CLI allows it
   (`claude --output-format stream-json` measured genuinely incremental: first event at 348ms,
   spread over 92% of the run — the only one of the four)
-- [ ] Fresh-machine install verification
+- [x] Fresh-clone install verification — in the suite, plus a tracked-files check so nothing ships missing
+- [ ] Fresh-MACHINE verification (a box without these CLIs already logged in)
 - [ ] Model-ID staleness check
 - [ ] More members (Mistral, DeepSeek, local via Ollama)
 

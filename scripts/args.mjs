@@ -40,6 +40,7 @@ export const FLAGS = {
   context: { type: 'list' },
   card: { type: 'list', into: 'context' },
   members: { type: 'value' },
+  'question-file': { type: 'value' },
   timeout: { type: 'number', min: 1, max: 120 },
   events: { type: 'optional-value' },
   'stage1-only': { type: 'bool' },

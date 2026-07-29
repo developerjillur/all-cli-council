@@ -75,6 +75,14 @@ const SECRET_SHAPES = [
 // **Raising it is a measurement, not a preference.** Re-run the probe, and probe the 27k–80k gap
 // while you are there; that measurement does not exist yet.
 const MAX_FILE_CHARS = 80_000;    // ~20k tokens — a large file whole, rather than half of one
+/**
+ * Beyond this, a file is refused outright rather than truncated.
+ *
+ * 8 MB is a hundred times the per-file ceiling. Something that large passed to `--context` is a build
+ * artefact, a log, or the wrong path — and silently sending a thousandth of it is less helpful than
+ * saying so. Below this, truncation still applies and is still announced.
+ */
+const MAX_FILE_BYTES_HARD = 8 * 1024 * 1024;
 const MAX_TOTAL_CHARS = 160_000;  // ~40k tokens — ABOVE the verified-obedient 27k. See above.
 /** The largest pack every member was actually verified to still follow instructions at. */
 export const VERIFIED_OBEDIENT_TOKENS = 27_000;
@@ -148,7 +156,44 @@ export function readForContext(file, root) {
         + 'any member timeout exists to end it' };
   }
 
-  let text = fs.readFileSync(real, 'utf8');
+  // ── read only what can possibly be sent ─────────────────────────────────────────────────────
+  //
+  // **This read the entire file before checking its size, and `st.size` was already known.** Measured:
+  // a 240 MB file passed to `--context` grew RSS by **738 MB** — a 3x amplification, because a UTF-8
+  // byte becomes a UTF-16 code unit in a JS string — in order to keep 80,113 characters. The ceiling
+  // was enforced *after* the damage.
+  //
+  // A file this far past the ceiling is almost certainly the wrong file, so say that rather than
+  // silently sending a thousandth of it.
+  if (st.size > MAX_FILE_BYTES_HARD) {
+    return { path: rel, skipped: `refused — ${(st.size / 1024 / 1024).toFixed(0)} MB, which is far past `
+      + `the ${(MAX_FILE_CHARS / 1000).toFixed(0)}k-character per-file ceiling. Only the first `
+      + `${(MAX_FILE_CHARS / 1000).toFixed(0)}k would have been sent, so this is almost certainly not the `
+      + `file you meant` };
+  }
+
+  let text;
+  if (st.size > MAX_FILE_CHARS * 4) {
+    // Only the head, and enough BYTES that the character ceiling is reachable: UTF-8 uses at most 4
+    // bytes per character, plus slack so the decode is not starved.
+    const want = MAX_FILE_CHARS * 4 + 64;
+    const fd = fs.openSync(real, 'r');
+    try {
+      const buf = Buffer.alloc(Math.min(want, st.size));
+      const read = fs.readSync(fd, buf, 0, buf.length, 0);
+      // A partial byte read can split a multi-byte character at the boundary, which decodes to U+FFFD
+      // — the same corruption the member-output path had. Slicing to the character ceiling afterwards
+      // removes the tail where it can occur.
+      text = buf.subarray(0, read).toString('utf8');
+    } finally { fs.closeSync(fd); }
+  } else {
+    text = fs.readFileSync(real, 'utf8');
+  }
+
+  // **The secret scan covers exactly what will be sent, which is the guarantee that matters.** For an
+  // oversized file that is the head rather than the whole thing — and reading 240 MB to inspect bytes
+  // that will never leave the machine buys nothing. For every file within the ceiling, which is every
+  // normal case, this is unchanged.
   if (SECRET_SHAPES.some((re) => re.test(text))) {
     return { path: rel, skipped: 'refused — contents match a secret shape' };
   }

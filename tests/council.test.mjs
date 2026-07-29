@@ -2321,12 +2321,32 @@ console.log('\n▸ Documentation drift — every flag and script the docs name m
   {
     const cmds = fs.readdirSync(path.join(ROOT, 'commands'))
       .map((f) => ({ f, body: fs.readFileSync(path.join(ROOT, 'commands', f), 'utf8') }));
-    // Distinctive phrases from the doctrine. If more than one command spells them out, it is duplicated.
-    for (const phrase of [
-      'form your own view first',
-      'Averaging the members produces',
-      'Agreement at 55%',
-    ]) {
+    // **Phrase matching was not enough, and a judge proved it.** The first version of this check looked
+    // for three exact strings, so a PARAPHRASE of the same doctrine passed — and that is exactly what
+    // survived in both files. A test that only catches copy-paste cannot catch restatement.
+    //
+    // So the CONCEPTS are checked, each by any of several wordings. If two commands both explain the
+    // same idea in their own words, that is still two sources that will drift.
+    const CONCEPTS = {
+      'read stage 1 before the rankings': [/before the rankings/i, /stage-1 answer/i, /form your own view/i],
+      'disagreement is the output': [/disagree\w* is the output/i, /[Aa]veraging the members/i, /record both sides/i],
+      'weigh by confidence not count': [/[Ww]eigh by confidence/i, /Agreement at \d+%/i, /rather than by count/i],
+      'verify every number yourself': [/[Ee]very number goes through/i, /verify every number/i],
+    };
+    for (const [concept, patterns] of Object.entries(CONCEPTS)) {
+      const owners = cmds.filter((c) => patterns.some((p) => p.test(c.body))).map((c) => c.f);
+      check(`the doctrine "${concept}" is explained in at most one command`, owners.length <= 1,
+        owners.join(' + ') || 'neither — both defer to the skill');
+    }
+    // And the skill must actually hold it, or "defer to the skill" is deferring to nothing.
+    {
+      const skill = fs.readFileSync(path.join(ROOT, 'skills', 'council', 'SKILL.md'), 'utf8');
+      for (const [concept, patterns] of Object.entries(CONCEPTS)) {
+        check(`the skill DOES hold "${concept}"`, patterns.some((p) => p.test(skill)),
+          'the commands point here, so it has to be here');
+      }
+    }
+    for (const phrase of []) {
       const owners = cmds.filter((c) => c.body.includes(phrase)).map((c) => c.f);
       check(`the doctrine phrase "${phrase.slice(0, 32)}…" lives in at most one command`,
         owners.length <= 1, owners.join(' + ') || 'none');
@@ -2356,11 +2376,23 @@ console.log('\n▸ Documentation drift — every flag and script the docs name m
     check('/council-custom launches detached rather than blocking', /--detach/.test(custom));
     check('/council-custom warns about --allow-uncontained', /allow-uncontained/.test(custom));
     check('...and about a repo-local roster deciding what runs', /local-roster/.test(custom));
-    check('/council-custom tells the user the command before spending',
-      /print the command first/i.test(custom));
-    check('...and warns about shell-quoting the user\'s own prose',
-      /Quote the question safely/.test(custom),
-      'a question containing a quote or a $ is mangled or expanded by a double-quoted shell string');
+    check('/council-custom shows the exact invocation before spending',
+      /node "\$CLAUDE_PLUGIN_ROOT\/scripts\/council\.mjs" --question-file=/.test(custom),
+      'a user who typed this wants to see it before it costs ten minutes');
+    check('...and puts the question in a FILE rather than a shell string',
+      /--question-file=/.test(custom) && /never in the shell/i.test(custom),
+      'every way of quoting prose for a shell fails on some prose — measured, twice');
+    check('...and shows NO double-quoted question form at all',
+      !/council\.mjs" "</.test(custom) && !/council\.mjs" "\$/.test(custom),
+      'the earlier version warned about the form it also demonstrated');
+    check('...and the heredoc it shows is QUOTED, which is what stops expansion',
+      /<<'COUNCIL_EOF'/.test(custom));
+    check('...and no longer names a specific member from memory',
+      !/\bgrok\b/.test(custom), 'the roster is what knows; --preflight prints it');
+    check('...and states the unit of --timeout', /--timeout=N`?, \*\*in minutes\*\*|in minutes/.test(custom));
+    check('...and its stopping conditions are a closed list of three',
+      /Only these stop you/.test(custom) && /closed list/.test(custom),
+      '"ask which they meant" had quietly become a fourth');
     check('...and states --detach as a DEFAULT rather than pretending it was asked for',
       /goes on by default/.test(custom) && /exception to the rule/.test(custom),
       'the command\'s own rule is "do not add flags they did not ask for"');
@@ -2370,10 +2402,10 @@ console.log('\n▸ Documentation drift — every flag and script the docs name m
       /"only codex and gemini"[\s\S]{0,90}--members=codex,gemini/.test(custom),
       'it said codex and gemini and mapped to the two Claude ids');
     check('...and "quick" is not silently equated with skipping the ranking',
-      /"quick" is ambiguous/.test(custom),
+      /"quick" usually means/.test(custom) && /does \*\*not\*\* mean/.test(custom),
       '--stage1-only changes WHAT you get, not how long it takes');
     check('...and roster facts are read from --preflight, not hardcoded in prose',
-      /--preflight prints the roster's actual ids|run\s+`--preflight`|do not name one from memory/.test(custom));
+      /Never name a member from memory/.test(custom) && /ids come from `--preflight`/.test(custom));
   }
 }
 

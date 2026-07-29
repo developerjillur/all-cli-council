@@ -167,7 +167,44 @@ const has = (n) => Boolean(parsed.flags[n]);
 /** The string value of a `=`-style flag, or undefined for a bare switch. */
 const flag = (n) => (typeof parsed.flags[n] === 'string' ? parsed.flags[n] : undefined);
 const ctxFiles = parsed.list.context ?? [];
-const { questionTokens, question } = parsed;
+let { questionTokens, question } = parsed;
+
+// ── --question-file: the question never goes through a shell ──────────────────
+//
+// **Every way of putting prose into a shell argument is unsafe for some prose**, and the council found
+// that the hard way after this file's own advice made it worse. Measured:
+//
+//   'Should we cache the user's session?'    → the shell dies on the apostrophe, and English prose is
+//                                             full of apostrophes
+//   -- Is $HOME safe and does `id -un` matter? → $HOME expanded and `id -un` EXECUTED
+//
+// The second was recommended here as the SAFE form. It turns the user's own words into executed shell.
+//
+// There is no quoting rule that fixes this, so the fix is not a quoting rule: the question goes in a
+// file and the shell never sees it. Both judges reached that independently, and they were right.
+if (flag('question-file')) {
+  const qf = path.resolve(ROOT, flag('question-file'));
+  try {
+    const st = fs.statSync(qf);
+    // The FIFO lesson again: a non-regular file blocks the read forever, before any timeout exists.
+    if (!st.isFile()) throw new Error('not a regular file (a FIFO or device would block forever)');
+    if (st.size > 1024 * 1024) throw new Error(`${(st.size / 1024).toFixed(0)} KB — a question, not a corpus`);
+    question = fs.readFileSync(qf, 'utf8').trim();
+    questionTokens = [question];
+  } catch (e) {
+    console.error(`\n  --question-file=${flag('question-file')} could not be read: ${e.message}\n`);
+    process.exit(1);
+  }
+  if (!question) {
+    console.error(`\n  --question-file=${flag('question-file')} is empty.\n`);
+    process.exit(1);
+  }
+  if (parsed.questionTokens.length) {
+    console.error(`\n  Both --question-file and a question on the command line were given. Pick one —`);
+    console.error(`  silently preferring either would answer a question you did not ask.\n`);
+    process.exit(1);
+  }
+}
 
 // Per-member, in minutes. Clamped by the parser to [1, 120]: `Number(flag) > 0` used to accept 0.0001
 // — a 6-millisecond budget that killed every member before it could speak — and an absurd upper value
@@ -186,7 +223,7 @@ if (parsed.flags.timeoutClamped) {
 // which is a different question in a different mode, reported as a success. The unknown-flag refusal
 // cannot catch this one, because `--lenses` is a real flag. Token count can, exactly.
 const anyFlag = argv.some((a) => a.startsWith('--'));
-if (questionTokens.length > 1 && anyFlag && !argv.includes('--')) {
+if (questionTokens.length > 1 && anyFlag && !argv.includes('--') && !flag('question-file')) {
   console.error(`\n  The question arrived as ${questionTokens.length} separate words, so it was not quoted:`);
   console.error(`      ${questionTokens.map((t) => JSON.stringify(t)).join(' ')}`);
   console.error('\n  QUOTE it. Unquoted, the shell splits the sentence into arguments — and any');
@@ -858,8 +895,10 @@ function ask(member, prompt, { stage = '1', raw = false } = {}) {
     // about as confidently as a whole one.
     p.stdout.on('data', (d) => {
       if (!truncatedOutput) {
-        if (out.length + d.length > MAX_MEMBER_OUTPUT) {
-          out += String(d).slice(0, Math.max(0, MAX_MEMBER_OUTPUT - out.length))
+        // BYTES, matching the name and the message. `out.length` is UTF-16 code units, so the real
+        // ceiling was up to 3x the announced MiB for multi-byte output — in the permissive direction.
+        if (Buffer.byteLength(out, 'utf8') + Buffer.byteLength(String(d), 'utf8') > MAX_MEMBER_OUTPUT) {
+          out += String(d).slice(0, Math.max(0, MAX_MEMBER_OUTPUT - Buffer.byteLength(out, 'utf8')))
             + `\n\n[TRUNCATED — this member produced more than ${MAX_MEMBER_OUTPUT / 1024 / 1024} MiB, `
             + `far past any real answer. Treat what is above as incomplete.]`;
           truncatedOutput = true;

@@ -50,7 +50,37 @@ Then it works **three ways**: the skill fires it automatically when a decision i
 members, mode, files, budget — with no judgement call about whether it was worth it. See
 [how it activates](#how-it-activates).
 
-### Standalone
+### One project only — project or local scope
+
+The install above is **user scope**: every project you open gets `/council`. To scope it to one
+repository instead, both commands take `--scope`, and the three values differ in *who else gets
+it*:
+
+| Scope | Writes | Shared? |
+|---|---|---|
+| `user` (default) | `~/.claude/settings.json` | just you, everywhere |
+| `project` | `.claude/settings.json` | **committed** — everyone who clones the repo |
+| `local` | `.claude/settings.local.json` | git-ignored — just you, this repo only |
+
+```
+/plugin marketplace add developerjillur/all-cli-council --scope local
+/plugin install all-cli-council@all-cli-council --scope local
+```
+
+Either way the plugin ends up as one line:
+
+```json
+{ "enabledPlugins": { "all-cli-council@all-cli-council": true } }
+```
+
+**Pick `project` when the team should get it** — commit that file and a clone needs no setup.
+**Pick `local` when it is your own preference** — `.claude/settings.local.json` is git-ignored,
+so nothing you do here lands in anyone else's checkout.
+
+To remove it from one repository without uninstalling it everywhere, set the value to `false`
+or delete the key.
+
+### Standalone — no Claude Code at all
 
 ```bash
 git clone https://github.com/developerjillur/all-cli-council
@@ -59,6 +89,21 @@ node ../all-cli-council/scripts/council.mjs "<question>" --context src/thing.js
 ```
 
 Node 22+. **No `npm install`** — there is nothing to install.
+
+Or put the bare commands on your `PATH` and drop the paths entirely:
+
+```bash
+ln -s "$PWD/all-cli-council/bin/"* /usr/local/bin/
+
+council "<question>" --context src/thing.js
+council-watch          # follow a run from another terminal
+council-status         # what is running, and what finished
+council-verify         # re-measure whether any member can write outside its scratch dir
+```
+
+The wrappers resolve through symlinks, so linking one into `PATH` — the ordinary way a command
+is installed — works. CI asserts that, because the naive `dirname "$0"` form breaks for exactly
+that case and looks correct until somebody links it.
 
 ### First, check what you have
 
@@ -176,8 +221,14 @@ all-cli-council/
 │   ├── verify-containment.mjs   proves each member cannot write
 │   ├── judge-output.mjs         is this an answer, or a CLI saying it cannot answer
 │   └── members.json             the roster. Override with .council/members.json
+├── bin/                         bare commands, on PATH while the plugin is enabled
+│   ├── council                  the run
+│   ├── council-watch            follow one from another terminal
+│   ├── council-status           is it done, and if not is it alive
+│   └── council-verify           re-measure member containment
 ├── tests/
 │   ├── council.test.mjs         573 cases, spends nothing
+│   ├── packaging.test.mjs       is this INSTALLABLE, or only runnable from a clone
 │   └── survives-session-death.mjs  one live call: SIGKILL the session, mid-run
 └── .claude-plugin/              plugin + marketplace manifests
 ```

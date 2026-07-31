@@ -2226,7 +2226,11 @@ console.log('\n▸ Documentation drift — every flag and script the docs name m
   ];
 
   // Flags belonging to the sibling scripts, which are not council.mjs's.
-  const OTHER_SCRIPT_FLAGS = new Set(['json', 'once', 'every', 'quiet-after', 'follow']);
+  // Flags belonging to OTHER tools the docs legitimately mention. `scope` is Claude Code's
+  // own `plugin install --scope user|project|local`, which the install section documents — the
+  // check exists to catch a council flag that does not exist, not to forbid naming another
+  // tool's. Verified against `claude plugin install --help` rather than assumed.
+  const OTHER_SCRIPT_FLAGS = new Set(['json', 'once', 'every', 'quiet-after', 'follow', 'scope']);
 
   // Flags belonging to the MEMBER CLIs. Sourced from the roster rather than hardcoded, so a member
   // whose invocation changes cannot leave the docs describing flags nothing passes any more.

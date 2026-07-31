@@ -1,5 +1,15 @@
 # The tests spend nothing — containment, parsing and aggregation are pure functions.
 # Live calls are the council's own business and never run here.
+#
+# ── what is deliberately NOT in this file, and why ──────────────────────────
+#
+# `tests/survives-session-death.mjs` SIGKILLs a session and proves a detached run finishes
+# anyway. `scripts/verify-containment.mjs` probes whether each member can write outside its
+# scratch directory. Both are real, both pass, and both spawn REAL model CLIs — so both would
+# spend a maintainer's subscription on every push, and neither can authenticate on a runner.
+#
+# They are the two most valuable checks here and they belong to a human before a release.
+# Excluding them is a decision, not an oversight, which is why it is written down.
 name: tests
 on: [push, pull_request]
 jobs:
@@ -9,4 +19,21 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: '22' }
+
+      # 573 assertions: containment classification, prompt delivery, judge parsing, bias
+      # diagnostics, aggregation. Every case demonstrated OPEN before it was closed.
       - run: node tests/council.test.mjs
+
+      # Is this installable, or only runnable from a clone? Catches a forgotten `git add`, a
+      # bin wrapper that lost its executable bit, a marketplace entry that names nothing, and a
+      # doc citing a script that is not there. Every one of those is invisible to the suite
+      # above, and the first run of this test found four untracked files.
+      - run: node tests/packaging.test.mjs
+
+      # The wrappers must work THROUGH a symlink — the ordinary way a command reaches PATH.
+      # The naive `dirname "$0"` form breaks for exactly that case.
+      - name: bin wrappers resolve through a symlink on PATH
+        run: |
+          mkdir -p /tmp/fakebin
+          ln -sf "$PWD/bin/council" /tmp/fakebin/council
+          /tmp/fakebin/council --preflight 2>&1 | head -2

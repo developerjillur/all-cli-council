@@ -1,0 +1,21 @@
+#!/bin/sh
+# council-verify — bare command for scripts/verify-containment.mjs, on PATH while this plugin is enabled.
+#
+# $0 is resolved THROUGH SYMLINKS before taking its directory. The naive form breaks for the
+# ordinary case: with /usr/local/bin/council-verify linked to the plugin copy, "$(dirname "$0")" is
+# /usr/local/bin and the wrapper looks for /usr/local/bin/../scripts/verify-containment.mjs, which does not
+# exist. Linking a command into PATH is how one is normally installed, so the naive form is
+# broken for the common case rather than an exotic one.
+#
+# Every expansion stays quoted, so a plugin path containing a space works too.
+src=$0
+while [ -L "$src" ]; do
+  dir=$(cd -P "$(dirname "$src")" > /dev/null && pwd)
+  src=$(readlink "$src")
+  case $src in
+    /*) ;;
+    *) src=$dir/$src ;;
+  esac
+done
+dir=$(cd -P "$(dirname "$src")" > /dev/null && pwd)
+exec node "$dir/../scripts/verify-containment.mjs" "$@"

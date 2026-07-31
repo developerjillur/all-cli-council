@@ -627,7 +627,8 @@ node scripts/council.mjs "<question>" --context src/q.js --lenses
 
 | Lens | Method |
 |---|---|
-| **Inversion** | assume it already failed in production; work backwards to the decision that caused it |
+| **Inversion** ↓ | assume it already failed in production; work backwards to the decision that caused it |
+| **Expansion** ↑ | hunt the upside everyone else is missing — **risk is explicitly not its job** |
 | **First principles** | decompose into atomic claims; mark each measured, sourced or assumed; attack the assumed |
 | **Analogy** | find where this is already solved — another subsystem, protocol, industry — and what it cost them |
 | **Naive outsider** | owe the conventions nothing; ask what an insider has stopped asking |
@@ -635,6 +636,22 @@ node scripts/council.mjs "<question>" --context src/q.js --lenses
 
 Assigned deterministically from the question, and **rotated** — so a lens is a property of the run,
 not of a member, and any effect is not confounded with that member's own tendencies.
+
+**↓ and ↑ are a guaranteed pair.** Every council of two or more members gets both, and which one
+leads rotates with the seed. That is enforced rather than left to the rotation, and 1,200
+assignments across six member counts are asserted in the suite — because with six lenses and
+usually four members, a plain rotation drops two per run, and the run that drops both poles is a
+council with no downside/upside tension at all.
+
+**Why the second pole exists.** Every other lens here is critical: inversion hunts failure,
+first-principles attacks assumptions, outsider finds unexamined premises, execution finds what
+blocks. *A council of five critics is a machine for producing reasons not to act*, and its
+agreement is not evidence — it is the set's own bias arriving on schedule. Taken from
+[aiwithremy/claude-skills-llm-council](https://github.com/aiwithremy/claude-skills-llm-council),
+whose five advisors are built around **three tensions** — Contrarian vs Expansionist, First
+Principles vs Executor, the Outsider in the middle. Four of its five already had counterparts
+here; the Expansionist did not, so this set had one pole of one tension and called it method
+diversity.
 
 **This is opt-in and unmeasured.** Nobody has shown here that lensed answers beat unlensed ones. What
 *is* measured is the reasoning-overlap number above, which is the instrument it would be tested
@@ -1014,12 +1031,12 @@ procfs, and a `--detach=1` fork bomb.
 ### What "tested" means here, precisely
 
 Not all of them are equal, and pretending otherwise would be the kind of claim this repo keeps a list
-of. Measured over the **476 `check()` call sites** in the suite — the runtime count is higher
+of. Measured over the **481 `check()` call sites** in the suite — the runtime count is higher
 because some sites run inside loops:
 
 | | call sites | what it proves |
 |---|---|---|
-| **behavioural** | **378** | runs the code or spawns the process and checks what happens |
+| **behavioural** | **383** | runs the code or spawns the process and checks what happens |
 | **source assertions** | **98** (21%) | that a file *contains* something — `O_NOFOLLOW` is used, `NODE_OPTIONS` is not in the allowlist, no recursive `mkdir` remains |
 
 The 98 are real and worth having — several of them are how a fix stays fixed, and "no `mkdirSync(...,
@@ -1098,6 +1115,13 @@ which is what made the silence here look like a bug rather than a limitation.
 The revision round is [Mixture-of-Agents](https://arxiv.org/abs/2406.04692). The bias taxonomy comes
 from the LLM-as-a-judge literature, including
 [Justice or Prejudice?](https://arxiv.org/abs/2410.02736).
+
+**The upside pole** is [aiwithremy/claude-skills-llm-council](https://github.com/aiwithremy/claude-skills-llm-council)'s.
+Its five advisors are built around **three tensions** rather than five critiques — Contrarian vs
+Expansionist, First Principles vs Executor, the Outsider in the middle. Four of its five already had
+counterparts in the lens set here; the Expansionist did not. So this council had `inversion` and
+nothing opposing it — one pole of one tension, called method diversity. A council of five critics
+converges on reasons not to act, and its agreement is the set's own bias rather than evidence.
 
 **Method diversity, theatrical-consensus detection and dissent preservation** are
 [ngmeyer/council-review](https://github.com/ngmeyer/council-review)'s — the sharpest of these

@@ -679,6 +679,55 @@ console.log('\n▸ Lenses — method diversity, assigned reproducibly');
     assignLenses(ids, 12346).a.id !== one.a.id);
   check('more members than lenses still assigns one to each',
     Object.keys(assignLenses([...ids, 'f', 'g'], 7)).length === 7);
+
+  // ── the downside/upside tension is GUARANTEED, not left to the rotation ────
+  //
+  // Six lenses and — with grok excluded for containment by default — usually four members. A
+  // plain rotation drops two lenses per run, and the run that drops both `inversion` and
+  // `expansion` is a council with no downside/upside tension at all. That tension is the whole
+  // reason the second pole was added; leaving it to chance would be adding a role and calling
+  // it a design.
+  //
+  // Asserted across many seeds and every realistic member count, because "it worked on the
+  // seed I tried" is how this repo's sibling shipped four fixtures against a layout that does
+  // not exist.
+  {
+    const poleOf = (a, id) => a[id].pole;
+    let missing = 0; let leadDownside = 0; let leadUpside = 0;
+    for (let seed = 0; seed < 200; seed++) {
+      for (const n of [2, 3, 4, 5, 6, 7]) {
+        const who = Array.from({ length: n }, (_, i) => `m${i}`);
+        const a = assignLenses(who, seed);
+        const poles = who.map((id) => poleOf(a, id)).filter(Boolean);
+        if (!poles.includes('downside') || !poles.includes('upside')) missing++;
+        // EVERY seed, not every other one. The first version sampled `seed % 2 === 0` while
+        // the lead rotates on seed parity — so it could only ever observe one side and
+        // reported the rotation broken. The sampling was the bug, and it took a real
+        // assertion to show it.
+        if (n === 4) { if (poleOf(a, 'm0') === 'downside') leadDownside++; else leadUpside++; }
+      }
+    }
+    check('every council of 2+ members carries BOTH poles — 1,200 assignments checked',
+      missing === 0, `${missing} assignments had only one side of the tension`);
+    check('...and which pole leads still rotates, so the pessimist is not a fixed seat',
+      leadDownside > 0 && leadUpside > 0, `downside-first ${leadDownside}, upside-first ${leadUpside}`);
+  }
+
+  // A single member cannot hold a tension, and pretending otherwise would be the kind of
+  // claim this council exists to refuse.
+  check('one member gets a lens but no pretence of tension',
+    Object.keys(assignLenses(['solo'], 5)).length === 1);
+
+  // The upside lens must not hedge — a lens that weighs risk is `inversion` under another
+  // name, and the tension is the product.
+  {
+    const expansion = LENSES.find((l) => l.id === 'expansion');
+    check('the expansion lens exists and is marked as the upside pole',
+      expansion?.pole === 'upside');
+    check('...and is told explicitly that risk is not its job',
+      /[Rr]isk is not/.test(expansion?.brief ?? ''),
+      'without this it converges on the same hedged paragraph as every other member');
+  }
 }
 
 // ── the prompts carry what the diagnostics need to read ──────────────────────

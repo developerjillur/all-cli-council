@@ -35,9 +35,35 @@ export const LENSES = [
   {
     id: 'inversion',
     name: 'Inversion',
+    pole: 'downside',
     brief: 'Assume the proposal has already failed in production. Work backwards from the failure '
       + 'to the decision that caused it. Name the specific mechanism, not a category of risk — '
       + '"the retry fires before the lock expires" rather than "there may be race conditions".',
+  },
+  {
+    // ── the lens this set was missing, and the reason it matters ──────────────
+    //
+    // Every other lens here is critical: inversion hunts failure, first-principles attacks
+    // assumptions, outsider finds unexamined premises, execution finds what blocks. A council
+    // of five critics is a machine for producing reasons not to act, and its agreement is not
+    // evidence — it is the set's own bias arriving on schedule.
+    //
+    // `aiwithremy/claude-skills-llm-council` states the design rule this set had broken:
+    // its five advisors "create three natural tensions — Contrarian vs Expansionist (downside
+    // vs upside), First Principles vs Executor (rethink vs do it), the Outsider in the middle."
+    // Four of its five map onto lenses already here. The Expansionist had no counterpart, so
+    // this set had one pole of one tension and called it method diversity.
+    //
+    // It is deliberately forbidden from weighing risk. A lens that hedges is the same lens as
+    // inversion wearing a different name, and the tension is the product.
+    id: 'expansion',
+    name: 'Expansion',
+    pole: 'upside',
+    brief: 'Hunt the upside everyone else is missing. What is being undervalued, what adjacent '
+      + 'opportunity is hiding, what happens if this works BETTER than expected? **Risk is not '
+      + 'your job** — another member is already assigned to it, and a hedged answer from you '
+      + 'costs the council the one perspective nothing else supplies. Be concrete: name the '
+      + 'specific larger thing this unlocks, not "it could scale".',
   },
   {
     id: 'first-principles',
@@ -79,7 +105,32 @@ export const LENSES = [
  */
 export function assignLenses(memberIds, seedNum) {
   const offset = Math.abs(seedNum) % LENSES.length;
-  return Object.fromEntries(memberIds.map((id, i) => [id, LENSES[(i + offset) % LENSES.length]]));
+  const rotated = memberIds.map((_, i) => LENSES[(i + offset) % LENSES.length]);
+
+  // ── the opposing pair is GUARANTEED, not left to the rotation ─────────────
+  //
+  // There are six lenses and, with grok excluded for containment by default, usually four
+  // members. A plain rotation therefore drops two lenses per run — and the run where it drops
+  // both `inversion` and `expansion` is a council with no downside/upside tension at all,
+  // which is the tension the whole set is built around.
+  //
+  // Adding the lens without this is adding a role and calling it a design. So when two or more
+  // members are present, the poles are seated first and the rotation fills what is left. Which
+  // pole leads still rotates with the seed, so "the first member is always the pessimist" does
+  // not become a property of the council.
+  if (memberIds.length >= 2) {
+    const poles = LENSES.filter((l) => l.pole);
+    const lead = Math.abs(seedNum) % poles.length;
+    const seated = [poles[lead], poles[(lead + 1) % poles.length]];
+    const rest = rotated.filter((l) => !l.pole);
+    const order = [...seated, ...rest];
+    // Fill any remaining slots from the unused lenses, then wrap — more members than lenses is
+    // supported and must still give everyone something.
+    const unused = LENSES.filter((l) => !order.some((o) => o.id === l.id));
+    const full = [...order, ...unused];
+    return Object.fromEntries(memberIds.map((id, i) => [id, full[i % full.length]]));
+  }
+  return Object.fromEntries(memberIds.map((id, i) => [id, rotated[i]]));
 }
 
 /** Shared tail: the two things every answer must end with, whatever stage it is. */

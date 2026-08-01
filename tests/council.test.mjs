@@ -2281,6 +2281,15 @@ console.log('\n▸ Documentation drift — every flag and script the docs name m
   // tool's. Verified against `claude plugin install --help` rather than assumed.
   const OTHER_SCRIPT_FLAGS = new Set(['json', 'once', 'every', 'quiet-after', 'follow', 'scope']);
 
+  // `ablation.mjs` is a second CLI with its own flags, read from ITS SOURCE rather than listed
+  // here — for the same reason the member flags are read from the roster two blocks down. A
+  // hardcoded list is a copy that drifts, and the drift shows up as a doc that describes a flag
+  // nothing accepts, which is precisely what this check exists to prevent.
+  const ablationSrc = fs.readFileSync(path.join(ROOT, 'scripts', 'ablation.mjs'), 'utf8');
+  for (const m of ablationSrc.matchAll(/\b(?:flag|val)\('([a-z][a-z0-9-]*)'\)/g)) {
+    OTHER_SCRIPT_FLAGS.add(m[1]);
+  }
+
   // Flags belonging to the MEMBER CLIs. Sourced from the roster rather than hardcoded, so a member
   // whose invocation changes cannot leave the docs describing flags nothing passes any more.
   const roster = JSON.parse(fs.readFileSync(path.join(ROOT, 'scripts', 'members.json'), 'utf8'));
@@ -2566,6 +2575,69 @@ console.log('\n▸ Integration — the suite must run the CLI, not only import i
     check(`scripts/${f} has no missing imports`, !/is not defined/.test(r.stderr ?? ''),
       (r.stderr ?? '').split('\n')[0].slice(0, 70));
   }
+
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+// ── the ablation harness ─────────────────────────────────────────────────────
+//
+// This is the harness for the one question this package has never answered: does a council beat
+// one good model? Its blinding is the part that has to be right — a scorer who can tell which
+// answer is the council's will score it higher, which is the same self-enhancement measured in
+// this package's own judges at 50% against a 25% baseline.
+console.log('\n▸ Ablation — the blind must actually be blind');
+{
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'abl-'));
+  const ARMS = ['solo', 'parallel', 'council'];
+  const corpus = {
+    stoppingRule: { n: 3, decide: 'council wins only by >= 15 points.' },
+    questions: [{ id: 'q1', question: 'a?' }, { id: 'q2', question: 'b?' }, { id: 'q3', question: 'c?' }],
+  };
+  fs.writeFileSync(path.join(dir, 'corpus.json'), JSON.stringify(corpus));
+  for (const q of corpus.questions) {
+    for (const a of ARMS) fs.writeFileSync(path.join(dir, `${q.id}.${a}.md`), `body ${a}`);
+  }
+  const abl = (...a) => spawnSync('node', [path.join(ROOT, 'scripts', 'ablation.mjs'), ...a],
+    { encoding: 'utf8' });
+
+  abl('--score', dir);
+  const key = JSON.parse(fs.readFileSync(path.join(dir, 'KEY.json'), 'utf8'));
+
+  // THE REGRESSION. The first implementation sorted by `(seed + arm.length) % 7`, which shifts
+  // every arm's key equally and therefore never changes their relative order: every question came
+  // out council/parallel/solo, so position A was ALWAYS the council. It reads like a shuffle and
+  // is a constant. Found by running it on two questions and reading KEY.json.
+  const firsts = new Set(Object.values(key).map((k) => k.A));
+  check('the arm in position A varies across questions',
+    firsts.size > 1, `every question put ${[...firsts][0]} first — the blind is not blind`);
+
+  // Every question must still map all three arms exactly once, or an arm silently goes unscored.
+  check('each question maps all three arms exactly once',
+    Object.values(key).every((k) => new Set(Object.values(k)).size === 3));
+
+  // The sheet is what the scorer reads. If it names the arms, the key file is decoration.
+  const sheet = fs.readFileSync(path.join(dir, 'SCORING-SHEET.md'), 'utf8');
+  const headings = sheet.match(/^### .*/gm) ?? [];
+  check('the scoring sheet labels answers A/B/C and never by arm',
+    headings.length > 0 && headings.every((h) => /^### [ABC]$/.test(h)), headings.join(' '));
+
+  // The stopping rule was declared before the data precisely so that "we stopped when it looked
+  // good" is unavailable. Reporting on a partial corpus is exactly that move.
+  fs.writeFileSync(path.join(dir, 'partial.json'), JSON.stringify({ q1: { A: 2, B: 0, C: 0 } }));
+  const r = abl('--reveal', dir, '--scores', path.join(dir, 'partial.json'));
+  check('--reveal refuses a corpus scored below the pre-registered n',
+    r.status !== 0 && /declared n=3/.test(r.stderr), `exit ${r.status}`);
+
+  // And a full corpus must report — including against the council, which is the outcome this
+  // harness exists to be able to publish.
+  const full = {};
+  for (const [id, k] of Object.entries(key)) {
+    full[id] = Object.fromEntries(Object.entries(k).map(([lab, arm]) => [lab, arm === 'solo' ? 2 : 0]));
+  }
+  fs.writeFileSync(path.join(dir, 'full.json'), JSON.stringify(full));
+  const done = abl('--reveal', dir, '--scores', path.join(dir, 'full.json'));
+  check('a full corpus reports, and can report the council LOSING',
+    done.status === 0 && /rule is NOT met/.test(done.stdout), done.stdout.slice(-120));
 
   fs.rmSync(dir, { recursive: true, force: true });
 }

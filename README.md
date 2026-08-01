@@ -955,9 +955,33 @@ opinion.
 <details>
 <summary><b>Is a council actually better than just asking one good model?</b></summary>
 
-**Nobody has measured that, including us.** The premise is borrowed from Mixture-of-Agents, not
-tested here. It is the top item in [CONTRIBUTING.md](CONTRIBUTING.md) and it is about half a
-day's work. A null result would be merged just as happily.
+**Still unmeasured — but the harness now exists, so it is no longer unmeasur*able*.** The premise
+is borrowed from Mixture-of-Agents. `council-ablation` runs three arms over a corpus you supply:
+
+| arm | what runs |
+|---|---|
+| `solo` | the strongest single member, same question, same context |
+| `parallel` | every member answers — **no** peer ranking, **no** synthesis |
+| `council` | the full pipeline |
+
+**The middle arm is the one that decides whether this package earns its complexity.** If `council`
+beats `solo` but not `parallel`, the value was showing you several independent answers, and the
+ranking, diagnostics and synthesis are ceremony that should be deleted. That is a result worth
+publishing and this repo would publish it.
+
+    council-ablation --example > corpus.json     # a corpus to start from
+    council-ablation --corpus corpus.json --out runs/
+    council-ablation --score runs/               # arms hidden, shuffled, labelled A/B/C
+    council-ablation --reveal runs/ --scores scores.json
+
+Scoring is **blind** — a scorer who knows which answer is the council's will rate it higher, which
+is the same self-enhancement this package measures in its own judges at 50% against a 25% baseline.
+The corpus declares `n` and the decision rule up front, and `--reveal` **refuses to report** until
+every question is scored, so "we stopped when it looked good" is not available.
+
+**What it does not supply is ground truth**, and it cannot: scoring needs decisions whose outcomes
+become known, or answers checkable against something executable. That part is yours. A null result
+would be merged just as happily.
 </details>
 
 <details>
@@ -983,7 +1007,9 @@ which is the failure mode this repo is built against.
 Listed because a tool that hides these is worth less than one without them.
 
 - **Nobody has measured whether a council beats one top-tier model.** The core premise is borrowed,
-  not tested. → [the experiment](CONTRIBUTING.md#the-one-experiment-this-needs-most)
+  not tested. The blind three-arm harness now ships as `council-ablation` — what is still missing
+  is a corpus with real ground truth, which only an owner of real decisions can supply.
+  → [the experiment](CONTRIBUTING.md#the-one-experiment-this-needs-most)
 - **`--lenses` is unmeasured too.** The argument for method diversity is sound and borrowed; the
   effect on *this* council is not established. Reasoning overlap is the instrument, and the
   before/after has not been run.
@@ -1031,12 +1057,12 @@ procfs, and a `--detach=1` fork bomb.
 ### What "tested" means here, precisely
 
 Not all of them are equal, and pretending otherwise would be the kind of claim this repo keeps a list
-of. Measured over the **481 `check()` call sites** in the suite — the runtime count is higher
+of. Measured over the **486 `check()` call sites** in the suite — the runtime count is higher
 because some sites run inside loops:
 
 | | call sites | what it proves |
 |---|---|---|
-| **behavioural** | **383** | runs the code or spawns the process and checks what happens |
+| **behavioural** | **388** | runs the code or spawns the process and checks what happens |
 | **source assertions** | **98** (21%) | that a file *contains* something — `O_NOFOLLOW` is used, `NODE_OPTIONS` is not in the allowlist, no recursive `mkdir` remains |
 
 The 98 are real and worth having — several of them are how a fix stays fixed, and "no `mkdirSync(...,

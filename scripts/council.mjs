@@ -1292,6 +1292,16 @@ const md = [
   ...(uncontained.length && !allowUncontained
     ? [`> **Excluded as uncontained:** ${uncontained.map((m) => m.label).join(', ')} — cannot be prevented from writing.`]
     : []),
+  // `reasoningOverlap` used to print a number and a ⚠ to the terminal and change nothing else.
+  // A four-vendor council reviewing this package called that out: "either it gates something or
+  // stop printing it as if it is doing work." It cannot honestly REFUSE a run — high overlap is a
+  // property of the answers, not an error — but it can stop the tally being read as corroboration.
+  // So it attaches here, to the verdict, where the number is actually load-bearing.
+  ...(overlap.distinctive !== null && overlap.distinctive > OVERLAP_SUSPECT
+    ? [`> **⚠ Reasoning overlap ${overlap.distinctive.toFixed(2)} — treat the tally as ONE argument, not ${overlap.usableN}.**`
+      + ` The members reached this using substantially the same distinctive vocabulary, so agreement`
+      + ` here is not independent corroboration. Read the dissent below before the consensus.`]
+    : []),
   ``,
 
   // ── rubric scores, when that is what was asked for ──

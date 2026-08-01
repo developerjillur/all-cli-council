@@ -6,3 +6,7 @@ node_modules/
 
 # Council runs are per-project output, not package content.
 .council/runs/
+branch_structure.json
+temp_auto_push.bat
+temp_interactive_push.bat
+.gitignore

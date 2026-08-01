@@ -1109,10 +1109,18 @@ why it can run on every push.
 - [x] **Containment verified per member, not claimed** — and one member failed
 - [x] **Prompt off `argv`** — stdin/file, with the platform limit enforced
 - [x] **Live progress as a consumable event stream** — terminal, watcher, extension
-- [x] **Reasoning overlap measured**, with the shared subject matter subtracted
+- [x] **Reasoning overlap measured**, with the shared subject matter subtracted — and it now
+      **changes the verdict** rather than only printing a number. Above the threshold, the run
+      file's header says *"treat the tally as ONE argument, not N"*: members reaching the same
+      answer through the same distinctive vocabulary are not independent corroboration. A
+      four-vendor council reviewing this package put it plainly — *either it gates something or
+      stop printing it as if it is doing work*
 - [x] Confidence and "what would change my mind" on every answer
 - [x] Minority view and its cost captured, not averaged away
-- [ ] **Council vs single model, measured** ← still the one that matters
+- [ ] **Council vs single model, measured** ← still the one that matters. The harness now exists:
+      `council-ablation` runs solo / parallel / council blind, with the decision rule
+      pre-registered. What is missing is a corpus with real ground truth, which only somebody
+      with real decisions can supply
 - [ ] **`--lenses` on vs off, measured by reasoning overlap** ← now possible, and cheap
 - [x] **Graded itself seven times, and acted on it** — 5.0 → 7.3, every finding closed with a test
 - [x] **Detachable** — a 10–30 minute run outlives the session that started it, proven by SIGKILL
